@@ -1,0 +1,74 @@
+[project]
+name = "odyssey"
+version = "0.1.0"
+description = "Python client for Odyssey's audio-visual intelligence platform"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Odyssey Team", email = "support@odyssey.ml" }
+]
+keywords = [
+    "interactive",
+    "interactive-video",
+    "ai",
+    "ai-video",
+    "generative",
+    "webrtc",
+    "streaming",
+    "video",
+    "odyssey",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "aiortc>=1.9.0",
+    "aiohttp>=3.9.0",
+    "websockets>=12.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+examples = [
+    "opencv-python>=4.8.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.urls]
+Homepage = "https://odyssey.ml"
+Documentation = "https://documentation.api.odyssey.ml/"
+Repository = "https://github.com/odysseyml/odyssey"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/odyssey"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
