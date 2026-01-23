@@ -1,6 +1,6 @@
 [project]
 name = "odyssey"
-version = "0.1.0"
+version = "1.0.0"
 description = "Python client for Odyssey's audio-visual intelligence platform"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,7 +20,7 @@ keywords = [
     "odyssey",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -38,7 +38,10 @@ dependencies = [
 
 [project.optional-dependencies]
 examples = [
-    "opencv-python>=4.8.0",
+    "opencv-python-headless>=4.8.0",
+    "pillow>=10.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
 ]
 dev = [
     "pytest>=8.0.0",

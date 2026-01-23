@@ -18,6 +18,8 @@ from ..types import VideoFrame
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_DATA_CHANNEL_MESSAGE_SIZE = 16 * 1024
+
 
 @dataclass
 class WebRTCCallbacks:
@@ -57,6 +59,10 @@ class WebRTCConnection:
         self._stream_start_future: asyncio.Future[str] | None = None
         self._interact_future: asyncio.Future[str] | None = None
         self._stream_end_future: asyncio.Future[None] | None = None
+
+        # Data channel state tracking
+        self._data_channel_open_future: asyncio.Future[None] | None = None
+        self._data_channel_open: bool = False
 
     def _log(self, msg: str) -> None:
         """Log a debug message."""
@@ -213,13 +219,28 @@ class WebRTCConnection:
         if not self._client_to_streamer_channel:
             return
 
+        def mark_channel_open() -> None:
+            """Mark the data channel as open and resolve any waiting future."""
+            self._log("Client -> Streamer channel open")
+            self._data_channel_open = True
+            # Resolve the future if someone is waiting
+            if self._data_channel_open_future and not self._data_channel_open_future.done():
+                self._data_channel_open_future.set_result(None)
+
         @self._client_to_streamer_channel.on("open")  # type: ignore[untyped-decorator]
         def on_open() -> None:
-            self._log("Client -> Streamer channel open")
+            mark_channel_open()
 
         @self._client_to_streamer_channel.on("close")  # type: ignore[untyped-decorator]
         def on_close() -> None:
             self._log("Client -> Streamer channel closed")
+            self._data_channel_open = False
+
+        # Check if the channel is already open (it might be by the time we set up handlers)
+        current_state = getattr(self._client_to_streamer_channel, "readyState", None)
+        self._log(f"Client -> Streamer channel initial state: {current_state}")
+        if current_state == "open":
+            mark_channel_open()
 
     def _setup_streamer_to_client_channel(self) -> None:
         """Setup streamer -> client data channel."""
@@ -284,28 +305,27 @@ class WebRTCConnection:
 
     def send_event(self, event: dict[str, Any]) -> None:
         """Send an event to the streamer via data channel."""
-        if not self._client_to_streamer_channel:
+        if not self.is_data_channel_open:
             raise ConnectionError("Client to streamer channel not open")
 
         self._log(f"Sending event: {event}")
         self._client_to_streamer_channel.send(json.dumps(event))
 
-    async def start_stream(self, prompt: str, portrait: bool) -> str:
-        """Start an interactive stream session.
+    def max_message_size(self) -> int:
+        """Return the max data channel message size in bytes."""
+        if self._pc and self._pc.sctp:
+            max_size = getattr(self._pc.sctp, "maxMessageSize", None)
+            if isinstance(max_size, int) and max_size > 0:
+                return max_size
+        return DEFAULT_MAX_DATA_CHANNEL_MESSAGE_SIZE
+
+    async def wait_for_stream_start(self) -> str:
+        """Wait for stream_started response from streamer.
 
         Returns:
-            Session ID when the stream is ready.
+            Stream ID when the stream is ready.
         """
         self._stream_start_future = asyncio.get_event_loop().create_future()
-
-        self.send_event(
-            {
-                "type": "interactive_stream_start",
-                "prompt": prompt,
-                "portrait": portrait,
-            }
-        )
-
         return await self._stream_start_future
 
     async def interact(self, prompt: str) -> str:
@@ -350,6 +370,8 @@ class WebRTCConnection:
         self._stream_start_future = None
         self._interact_future = None
         self._stream_end_future = None
+        self._data_channel_open_future = None
+        self._data_channel_open = False
 
         # Close data channels
         self._client_to_streamer_channel = None
@@ -363,4 +385,31 @@ class WebRTCConnection:
     @property
     def is_data_channel_open(self) -> bool:
         """Check if data channel is ready."""
-        return self._client_to_streamer_channel is not None
+        if not self._client_to_streamer_channel:
+            return False
+        return getattr(self._client_to_streamer_channel, "readyState", None) == "open"
+
+    async def wait_for_data_channel_open(self, timeout: float = 30.0) -> None:
+        """Wait for the data channel to become open.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Raises:
+            asyncio.TimeoutError: If timeout expires before channel opens.
+        """
+        # If already open, return immediately
+        if self._data_channel_open:
+            self._log("Data channel already open")
+            return
+
+        # Create future to wait on
+        self._data_channel_open_future = asyncio.get_event_loop().create_future()
+
+        try:
+            self._log(f"Waiting for data channel to open (timeout={timeout}s)...")
+            await asyncio.wait_for(self._data_channel_open_future, timeout=timeout)
+            self._log("Data channel is now open")
+        except asyncio.TimeoutError:
+            self._log("Timeout waiting for data channel to open")
+            raise

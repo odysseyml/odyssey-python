@@ -9,10 +9,12 @@ Complete API reference for the `odyssey` Python client library.
 - [Quick Start](#quick-start)
 - [Odyssey Class](#odyssey-class)
   - [Constructor](#constructor)
-  - [Methods](#methods)
+  - [Interactive Streaming Methods](#methods)
+  - [Simulation Methods](#simulatescript-scripts-script_url-portrait)
   - [Properties](#properties)
 - [Types & Interfaces](#types--interfaces)
 - [Usage Examples](#usage-examples)
+- [Error Handling](#error-handling)
 
 ---
 
@@ -32,17 +34,26 @@ uv pip install git+https://github.com/odysseyml/odyssey-python.git
 
 ## API Summary
 
-### Methods
+### Interactive Streaming Methods
 
 | Signature | Description |
 |-----------|-------------|
 | `connect(**handlers) -> None` | Connect to a streaming session (raises on failure) |
 | `disconnect() -> None` | Disconnect and clean up resources |
-| `start_stream(prompt, portrait?) -> str` | Start an interactive stream |
+| `start_stream(prompt, portrait?, image?, image_path?) -> str` | Start an interactive stream |
 | `interact(prompt) -> str` | Send a prompt to update the video |
 | `end_stream() -> None` | End the current stream session |
 | `get_recording(stream_id) -> Recording` | Get recording URLs for a stream |
 | `list_stream_recordings(limit?, offset?) -> StreamRecordingsList` | List user's stream recordings |
+
+### Simulation Methods (No Connection Required)
+
+| Signature | Description |
+|-----------|-------------|
+| `simulate(script?, scripts?, script_url?, portrait?) -> SimulationJobDetail` | Submit an async simulation job |
+| `get_simulate_status(job_id) -> SimulationJobDetail` | Get job status and output URLs |
+| `list_simulations(status?, active?, limit?, offset?) -> SimulationJobsList` | List user's simulation jobs |
+| `cancel_simulation(job_id) -> SimulationJobInfo` | Cancel a pending/dispatched job |
 
 ### Properties
 
@@ -207,12 +218,17 @@ await client.disconnect()
 
 ---
 
-#### `start_stream(prompt, portrait?)`
+#### `start_stream(prompt, portrait?, image?, image_path?)`
 
-Start an interactive stream session.
+Start an interactive stream session. Optionally provide an image for image-to-video (i2v) generation.
 
 ```python
-async def start_stream(prompt: str = "", portrait: bool = True) -> str
+async def start_stream(
+    prompt: str = "",
+    portrait: bool = True,
+    image: str | bytes | PIL.Image.Image | np.ndarray | None = None,
+    image_path: str | None = None,  # Deprecated
+) -> str
 ```
 
 **Parameters:**
@@ -220,20 +236,46 @@ async def start_stream(prompt: str = "", portrait: bool = True) -> str
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `prompt` | `str` | `""` | Initial prompt to generate video content |
-| `portrait` | `bool` | `True` | `True` for portrait (480x832), `False` for landscape (832x480) |
+| `portrait` | `bool` | `True` | `True` for portrait (704x1280), `False` for landscape (1280x704) |
+| `image` | `Any \| None` | `None` | Image for i2v generation (see supported formats below) |
+| `image_path` | `str \| None` | `None` | **Deprecated.** Use `image` instead. Path to local image file. |
+
+**Supported Image Formats:**
+
+| Type | Description |
+|------|-------------|
+| `str` | File path or base64 data URL (`data:image/...;base64,...`) |
+| `bytes` | Raw image bytes (JPEG, PNG, etc.) |
+| `PIL.Image.Image` | PIL/Pillow Image object |
+| `numpy.ndarray` | RGB uint8 array with shape (H, W, 3) |
 
 **Returns:** `str` - Stream ID when the stream is ready. Use this ID for recordings.
 
-**Raises:** `OdysseyStreamError` - If not connected or stream fails to start.
+**Raises:**
+- `OdysseyStreamError` - If not connected or stream fails to start.
+- `ValueError` - If image format unsupported, file not found, or too large (max 25MB).
 
 **Example:**
 
 ```python
-try:
-    stream_id = await client.start_stream("A cat", portrait=True)
-    print(f"Stream started: {stream_id}")
-except OdysseyStreamError as e:
-    print(f"Failed to start stream: {e}")
+# Text-to-video
+stream_id = await client.start_stream("A cat sleeping", portrait=True)
+
+# Image-to-video with file path
+stream_id = await client.start_stream(
+    prompt="The robot starts dancing",
+    portrait=False,
+    image="/path/to/robot.jpg",
+)
+
+# Image-to-video with PIL Image
+from PIL import Image
+img = Image.open("robot.jpg")
+stream_id = await client.start_stream(prompt="Robot dancing", image=img)
+
+# Image-to-video with numpy array (e.g., from OpenCV)
+frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+stream_id = await client.start_stream(prompt="Animate this", image=frame_rgb)
 ```
 
 ---
@@ -344,6 +386,213 @@ result = await client.list_stream_recordings(limit=10)
 for rec in result.recordings:
     print(f"{rec.stream_id}: {rec.duration_seconds}s ({rec.width}x{rec.height})")
 print(f"Total: {result.total}")
+```
+
+---
+
+#### `simulate(script?, scripts?, script_url?, portrait?)`
+
+Submit an asynchronous simulation job. Simulations generate video server-side without requiring a live WebRTC connection.
+
+```python
+async def simulate(
+    *,
+    script: list[dict] | None = None,
+    scripts: list[list[dict]] | None = None,
+    script_url: str | None = None,
+    portrait: bool = True,
+) -> SimulationJobDetail
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `script` | `list[dict] \| None` | `None` | Single script to run |
+| `scripts` | `list[list[dict]] \| None` | `None` | Batch mode - multiple scripts |
+| `script_url` | `str \| None` | `None` | URL to script JSON file |
+| `portrait` | `bool` | `True` | `True` for portrait (704x1280), `False` for landscape (1280x704) |
+
+**Script Format:**
+
+A script is a list of entries that define the video generation timeline. Each entry has a `timestamp_ms` and exactly one action type:
+
+| Entry Type | Required Fields | Description |
+|------------|-----------------|-------------|
+| `start` | `prompt` | Begins video generation. Must be the first entry (timestamp 0). |
+| `interact` | `prompt` | Changes the scene mid-video. Can have multiple. |
+| `end` | *(none)* | Ends the video. Must be the last entry. |
+
+```python
+# Start entry - begins the video (required, must be first at timestamp 0)
+{"timestamp_ms": 0, "start": {"prompt": "Description", "image": <optional>}}
+
+# Interact entry - changes the scene (optional, can have multiple)
+{"timestamp_ms": 5000, "interact": {"prompt": "Something happens"}}
+
+# End entry - ends the video (required, must be last)
+{"timestamp_ms": 10000, "end": {}}
+```
+
+**Timing Rules:**
+- `timestamp_ms: 0` — First entry must be `start` at time 0
+- Entries must be in chronological order
+- The `end` entry's timestamp determines video duration
+- Minimum recommended gap between interactions: 3000ms (3 seconds)
+
+**Supported Image Formats (start entry only):**
+
+The `image` field in start entries accepts:
+- `str` — File path (e.g., `/path/to/image.jpg`) or base64 data URL
+- `bytes` — Raw image bytes (PNG, JPEG, WebP)
+- `PIL.Image.Image` — PIL Image object
+- `numpy.ndarray` — RGB uint8 array with shape (height, width, 3)
+
+Images are automatically resized server-side to match the selected orientation.
+
+**Returns:** `SimulationJobDetail` - Job info including `job_id` for tracking.
+
+**Raises:** `ValueError` - If invalid script options. `ConnectionError` - If API request fails.
+
+**Note:** This method can be called without an active connection. It only requires a valid API key.
+
+**Example:**
+
+```python
+# Text-to-video
+job = await client.simulate(
+    script=[
+        {"timestamp_ms": 0, "start": {"prompt": "A cat sleeping"}},
+        {"timestamp_ms": 5000, "interact": {"prompt": "The cat wakes up"}},
+        {"timestamp_ms": 10000, "end": {}},
+    ]
+)
+
+# Image-to-video with file path
+job = await client.simulate(
+    script=[
+        {"timestamp_ms": 0, "start": {"prompt": "Robot dancing", "image": "/path/to/robot.jpg"}},
+        {"timestamp_ms": 10000, "end": {}},
+    ],
+    portrait=False,
+)
+
+# Image-to-video with PIL Image
+from PIL import Image
+img = Image.open("photo.jpg")
+job = await client.simulate(
+    script=[
+        {"timestamp_ms": 0, "start": {"prompt": "Animate this", "image": img}},
+        {"timestamp_ms": 10000, "end": {}},
+    ]
+)
+```
+
+---
+
+#### `get_simulate_status(job_id)`
+
+Get the status of a simulation job, including output URLs when complete.
+
+```python
+async def get_simulate_status(job_id: str) -> SimulationJobDetail
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `job_id` | `str` | The job ID from `simulate()` |
+
+**Returns:** `SimulationJobDetail` - Job status with output streams if completed.
+
+**Raises:** `ValueError` - If job not found or not authorized. `ConnectionError` - If API request fails.
+
+**Note:** This method can be called without an active connection.
+
+**Example:**
+
+```python
+status = await client.get_simulate_status(job.job_id)
+print(f"Status: {status.status.value}")
+
+if status.status == SimulationJobStatus.COMPLETED:
+    print(f"Video URL: {status.streams[0].video_url}")
+```
+
+---
+
+#### `list_simulations(status?, active?, limit?, offset?)`
+
+List the user's simulation jobs with optional filtering.
+
+```python
+async def list_simulations(
+    *,
+    status: SimulationJobStatus | None = None,
+    active: bool | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> SimulationJobsList
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status` | `SimulationJobStatus \| None` | `None` | Filter by job status |
+| `active` | `bool \| None` | `None` | Only show active jobs (pending/dispatched/processing) |
+| `limit` | `int \| None` | `None` | Maximum jobs to return (default: 20, max: 100) |
+| `offset` | `int \| None` | `None` | Number of jobs to skip for pagination |
+
+**Returns:** `SimulationJobsList` - Paginated list of simulation jobs.
+
+**Raises:** `ValueError` - If invalid parameters or not authorized. `ConnectionError` - If API request fails.
+
+**Note:** This method can be called without an active connection.
+
+**Example:**
+
+```python
+# List all simulations
+result = await client.list_simulations(limit=10)
+for job in result.jobs:
+    print(f"{job.job_id}: {job.status.value}")
+
+# List only active jobs
+active = await client.list_simulations(active=True)
+```
+
+---
+
+#### `cancel_simulation(job_id)`
+
+Cancel a pending or dispatched simulation job.
+
+```python
+async def cancel_simulation(job_id: str) -> SimulationJobInfo
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `job_id` | `str` | The job ID to cancel |
+
+**Returns:** `SimulationJobInfo` - Cancellation confirmation.
+
+**Raises:** `ValueError` - If job not found, not authorized, or cannot be cancelled (already processing/completed).
+
+**Note:** This method can be called without an active connection.
+
+**Example:**
+
+```python
+try:
+    result = await client.cancel_simulation(job.job_id)
+    print(f"Cancelled: {result.status.value}")
+except ValueError as e:
+    print(f"Cannot cancel: {e}")
 ```
 
 ---
@@ -478,6 +727,96 @@ class ConnectionStatus(str, Enum):
     CONNECTED = "connected"            # Connected and ready
     DISCONNECTED = "disconnected"      # Disconnected (clean)
     FAILED = "failed"                  # Connection failed (fatal)
+```
+
+---
+
+### SimulationJobStatus
+
+```python
+class SimulationJobStatus(str, Enum):
+    PENDING = "pending"          # Job is queued, waiting to be dispatched
+    DISPATCHED = "dispatched"    # Job has been dispatched to a worker
+    PROCESSING = "processing"    # Job is currently being processed
+    COMPLETED = "completed"      # Job completed successfully
+    FAILED = "failed"            # Job failed
+    CANCELLED = "cancelled"      # Job was cancelled by user
+```
+
+---
+
+### SimulationStream
+
+Output stream from a completed simulation job.
+
+```python
+@dataclass(frozen=True, slots=True)
+class SimulationStream:
+    stream_id: str                    # Unique stream identifier
+    video_url: str | None             # Presigned URL for video file
+    events_url: str | None            # Presigned URL for events JSON
+    thumbnail_url: str | None         # Presigned URL for thumbnail
+    preview_url: str | None           # Presigned URL for preview video
+    frame_count: int | None           # Total frames in video
+    duration_seconds: float | None    # Duration in seconds
+    script_index: int                 # Index in batch mode (0 for single)
+```
+
+**Note:** URLs are presigned and valid for approximately 1 hour.
+
+---
+
+### SimulationJobInfo
+
+Summary information for a simulation job (used in lists).
+
+```python
+@dataclass(frozen=True, slots=True)
+class SimulationJobInfo:
+    job_id: str                       # Unique job identifier
+    status: SimulationJobStatus       # Current job status
+    priority: str                     # Job priority level
+    created_at: str                   # ISO 8601 timestamp
+    completed_at: str | None          # ISO 8601 timestamp or None
+    error_message: str | None         # Error message if failed
+```
+
+---
+
+### SimulationJobDetail
+
+Detailed information for a simulation job (includes output streams).
+
+```python
+@dataclass(frozen=True, slots=True)
+class SimulationJobDetail:
+    job_id: str                       # Unique job identifier
+    status: SimulationJobStatus       # Current job status
+    priority: str                     # Job priority level
+    created_at: str                   # ISO 8601 timestamp
+    dispatched_at: str | None         # When job was dispatched
+    started_at: str | None            # When processing started
+    completed_at: str | None          # When job completed
+    error_message: str | None         # Error message if failed
+    assigned_region: str | None       # Processing region
+    retry_count: int                  # Number of retries
+    streams: list[SimulationStream]   # Output streams (populated when complete)
+    estimated_wait_minutes: float | None  # Estimated queue wait time
+```
+
+---
+
+### SimulationJobsList
+
+Paginated list of simulation jobs.
+
+```python
+@dataclass(frozen=True, slots=True)
+class SimulationJobsList:
+    jobs: list[SimulationJobInfo]     # List of job summaries
+    total: int                        # Total jobs available
+    limit: int                        # Max per request
+    offset: int                       # Jobs skipped
 ```
 
 ---
@@ -623,6 +962,81 @@ async def main():
 
     print(f"Collected {len(frames_collected)} frames")
     # Process frames...
+
+asyncio.run(main())
+```
+
+### Simulation Job
+
+```python
+import asyncio
+from odyssey import Odyssey, SimulationJobStatus
+
+async def main():
+    client = Odyssey(api_key="ody_your_api_key_here")
+
+    try:
+        # Submit job
+        job = await client.simulate(
+            script=[
+                {"timestamp_ms": 0, "start": {"prompt": "A cat sleeping on a couch"}},
+                {"timestamp_ms": 5000, "interact": {"prompt": "The cat wakes up and stretches"}},
+                {"timestamp_ms": 10000, "end": {}},
+            ]
+        )
+        print(f"Job submitted: {job.job_id}")
+
+        # Poll for completion
+        while True:
+            status = await client.get_simulate_status(job.job_id)
+            print(f"Status: {status.status.value}")
+
+            if status.status == SimulationJobStatus.COMPLETED:
+                stream = status.streams[0]
+                print(f"Video URL: {stream.video_url}")
+                print(f"Duration: {stream.duration_seconds}s")
+                break
+            elif status.status == SimulationJobStatus.FAILED:
+                print(f"Failed: {status.error_message}")
+                break
+            elif status.status == SimulationJobStatus.CANCELLED:
+                print("Job was cancelled")
+                break
+
+            await asyncio.sleep(5)
+    finally:
+        await client.disconnect()
+
+asyncio.run(main())
+```
+
+### Image-to-Video Simulation
+
+```python
+import asyncio
+from PIL import Image
+from odyssey import Odyssey, SimulationJobStatus
+
+async def main():
+    client = Odyssey(api_key="ody_your_api_key_here")
+
+    # Load image (supports: file path, bytes, PIL Image, numpy array)
+    img = Image.open("robot.jpg")
+
+    try:
+        job = await client.simulate(
+            script=[
+                {"timestamp_ms": 0, "start": {"prompt": "Robot starts dancing", "image": img}},
+                {"timestamp_ms": 5000, "interact": {"prompt": "Robot does a spin"}},
+                {"timestamp_ms": 10000, "end": {}},
+            ],
+            portrait=False,  # Landscape
+        )
+        print(f"Job submitted: {job.job_id}")
+
+        # Wait for completion...
+    finally:
+        await client.disconnect()
 
 asyncio.run(main())
 ```

@@ -37,6 +37,11 @@ from .types import (
     ErrorCallback,
     InteractAcknowledgedCallback,
     Recording,
+    SimulationJobDetail,
+    SimulationJobInfo,
+    SimulationJobsList,
+    SimulationJobStatus,
+    SimulationStream,
     StatusChangeCallback,
     StreamEndedCallback,
     StreamErrorCallback,
@@ -66,6 +71,12 @@ __all__ = [
     "Recording",
     "StreamRecordingInfo",
     "StreamRecordingsList",
+    # Simulation types
+    "SimulationJobStatus",
+    "SimulationStream",
+    "SimulationJobInfo",
+    "SimulationJobDetail",
+    "SimulationJobsList",
     # Callback types
     "VideoFrameCallback",
     "ConnectedCallback",
@@ -78,4 +89,4 @@ __all__ = [
     "StatusChangeCallback",
 ]
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

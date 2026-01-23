@@ -123,6 +123,124 @@ class ConnectionStatus(str, Enum):
     """Connection failed (fatal)."""
 
 
+class SimulationJobStatus(str, Enum):
+    """Status of a simulation job."""
+
+    PENDING = "pending"
+    """Job is queued and waiting to be dispatched."""
+
+    DISPATCHED = "dispatched"
+    """Job has been dispatched to a worker."""
+
+    PROCESSING = "processing"
+    """Job is currently being processed."""
+
+    COMPLETED = "completed"
+    """Job has completed successfully."""
+
+    FAILED = "failed"
+    """Job has failed."""
+
+    CANCELLED = "cancelled"
+    """Job was cancelled by the user."""
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationStream:
+    """Output stream from a simulation job.
+
+    Attributes:
+        stream_id: Unique identifier for the stream.
+        video_url: Presigned URL for the video file, or None if not yet available.
+        events_url: Presigned URL for the events JSON file, or None if not available.
+        thumbnail_url: Presigned URL for the thumbnail image, or None if not available.
+        preview_url: Presigned URL for the preview video, or None if not available.
+        frame_count: Total number of frames in the video, or None if not available.
+        duration_seconds: Duration of the video in seconds, or None if not available.
+        script_index: Index of the script in batch mode (0 for single script).
+    """
+
+    stream_id: str
+    video_url: str | None
+    events_url: str | None
+    thumbnail_url: str | None
+    preview_url: str | None
+    frame_count: int | None
+    duration_seconds: float | None
+    script_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationJobInfo:
+    """Summary information for a simulation job in a list.
+
+    Attributes:
+        job_id: Unique identifier for the job.
+        status: Current status of the job.
+        priority: Priority level of the job.
+        created_at: ISO 8601 timestamp when the job was created.
+        completed_at: ISO 8601 timestamp when the job completed, or None if not completed.
+        error_message: Error message if the job failed, or None otherwise.
+    """
+
+    job_id: str
+    status: SimulationJobStatus
+    priority: str
+    created_at: str
+    completed_at: str | None
+    error_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationJobDetail:
+    """Detailed information for a simulation job.
+
+    Attributes:
+        job_id: Unique identifier for the job.
+        status: Current status of the job.
+        priority: Priority level of the job.
+        created_at: ISO 8601 timestamp when the job was created.
+        dispatched_at: ISO 8601 timestamp when the job was dispatched, or None.
+        started_at: ISO 8601 timestamp when processing started, or None.
+        completed_at: ISO 8601 timestamp when the job completed, or None.
+        error_message: Error message if the job failed, or None otherwise.
+        assigned_region: Region where the job is being processed, or None.
+        retry_count: Number of times the job has been retried.
+        streams: List of output streams from the simulation.
+        estimated_wait_minutes: Estimated wait time in minutes, or None if not available.
+    """
+
+    job_id: str
+    status: SimulationJobStatus
+    priority: str
+    created_at: str
+    dispatched_at: str | None
+    started_at: str | None
+    completed_at: str | None
+    error_message: str | None
+    assigned_region: str | None
+    retry_count: int
+    streams: list[SimulationStream]
+    estimated_wait_minutes: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationJobsList:
+    """Paginated list of simulation jobs.
+
+    Attributes:
+        jobs: List of simulation job summaries.
+        total: Total number of jobs available.
+        limit: Maximum number of jobs returned per request.
+        offset: Number of jobs skipped.
+    """
+
+    jobs: list[SimulationJobInfo]
+    total: int
+    limit: int
+    offset: int
+
+
 # Type aliases for callbacks
 type VideoFrameCallback = Callable[[VideoFrame], None]
 type StreamStartedCallback = Callable[[str], None]  # stream_id

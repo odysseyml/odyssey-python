@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Heartbeat interval in seconds
 HEARTBEAT_INTERVAL_S = 10.0
+MAX_SIGNALING_MESSAGE_SIZE = 64 * 1024 * 1024
 
 type SignalingMessage = dict[str, Any]
 type MessageHandler = Callable[[SignalingMessage], Awaitable[None] | None]
@@ -103,7 +104,7 @@ class SignalingClient:
         self._log(f"Connecting to {url}")
 
         try:
-            self._ws = await websockets.connect(url)
+            self._ws = await websockets.connect(url, max_size=MAX_SIGNALING_MESSAGE_SIZE)
             self._connected = True
             self._log("WebSocket connection opened")
 
