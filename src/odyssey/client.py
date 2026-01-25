@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from ._internal import AuthClient, RecordingsClient, SignalingClient, SimulationsClient, WebRTCConnection
 from ._internal.webrtc import WebRTCCallbacks
@@ -766,50 +766,83 @@ class Odyssey:
                 debug=self._config.dev.debug,
             )
 
+    @overload
     async def simulate(
         self,
+        prompts: list[str | dict[str, Any]],
+        *,
+        portrait: bool = True,
+        interval: int = 3000,
+    ) -> SimulationJobDetail: ...
+
+    @overload
+    async def simulate(
+        self,
+        prompts: None = None,
         *,
         script: list[dict[str, Any]] | None = None,
         scripts: list[list[dict[str, Any]]] | None = None,
         script_url: str | None = None,
         portrait: bool = True,
+    ) -> SimulationJobDetail: ...
+
+    async def simulate(
+        self,
+        prompts: list[str | dict[str, Any]] | None = None,
+        *,
+        script: list[dict[str, Any]] | None = None,
+        scripts: list[list[dict[str, Any]]] | None = None,
+        script_url: str | None = None,
+        portrait: bool = True,
+        interval: int = 3000,
     ) -> SimulationJobDetail:
         """Submit a simulation job to be processed asynchronously.
 
-        Simulation jobs generate video without requiring an active WebRTC connection.
-        The video is generated server-side and can be retrieved once complete.
+        Supports two calling styles:
 
-        Images in script entries can be provided as:
-        - File path (str): Local path to an image file
-        - Raw bytes: Image file contents as bytes
-        - PIL Image: A PIL/Pillow Image object
-        - NumPy array: RGB uint8 array with shape (H, W, 3)
-        - Base64 data URL (str): Already encoded (data:image/...;base64,...)
+        **Simple (ergonomic):** Pass a list of prompts. The first prompt starts the video,
+        subsequent prompts are interactions spaced by `interval` (default 3000ms).
 
-        The client automatically converts all formats to base64 before sending.
+        **Full control:** Pass keyword arguments with explicit script entries and timestamps.
 
         Note: This method can be called without an active connection.
         It only requires a valid API key.
 
         Args:
-            script: Single script to run. List of script entries with:
-                - timestamp_ms: Time in milliseconds
-                - start: {"prompt": str, "image": <any supported format>}
-                - interact: {"prompt": str}
-                - end: {}
+            prompts: Simple mode - list of prompt strings (or dicts with prompt/image).
+                First prompt starts the video, subsequent prompts are interactions.
+            script: Full control - single script with explicit timestamps.
             scripts: Batch mode - multiple scripts to run in parallel.
-            script_url: URL to script JSON file (alternative to script/scripts).
+            script_url: URL to script JSON file.
             portrait: True for portrait (704x1280), False for landscape (1280x704).
+            interval: Time between prompts in simple mode (default 3000ms).
 
         Returns:
             SimulationJobDetail with job info including job_id.
 
         Raises:
-            ValueError: If invalid script options provided or unsupported image format.
+            ValueError: If invalid options provided.
             ConnectionError: If API request fails.
 
         Example:
-            # Text-to-video simulation
+            # Simple: list of prompts (recommended)
+            job = await client.simulate(["A cat sleeping", "The cat wakes up", "The cat stretches"])
+
+            # Simple with options
+            job = await client.simulate(
+                ["A cat sleeping", "The cat yawns"],
+                portrait=False,
+                interval=5000,
+            )
+
+            # Simple with image-to-video (first entry as dict)
+            job = await client.simulate([
+                {"prompt": "A robot dancing", "image": "/path/to/image.jpg"},
+                "The robot spins",
+                "The robot bows",
+            ])
+
+            # Full control: explicit timestamps
             job = await client.simulate(
                 script=[
                     {"timestamp_ms": 0, "start": {"prompt": "A cat sleeping"}},
@@ -817,36 +850,23 @@ class Odyssey:
                     {"timestamp_ms": 10000, "end": {}},
                 ]
             )
-
-            # Image-to-video with file path
-            job = await client.simulate(
-                script=[
-                    {"timestamp_ms": 0, "start": {"prompt": "Robot dancing", "image": "/path/to/image.jpg"}},
-                    {"timestamp_ms": 10000, "end": {}},
-                ]
-            )
-
-            # Image-to-video with PIL Image
-            from PIL import Image
-            img = Image.open("photo.jpg")
-            job = await client.simulate(
-                script=[
-                    {"timestamp_ms": 0, "start": {"prompt": "Animate this", "image": img}},
-                    {"timestamp_ms": 10000, "end": {}},
-                ]
-            )
-
-            # Image-to-video with numpy array (e.g., from OpenCV)
-            import cv2
-            frame = cv2.imread("photo.jpg")
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            job = await client.simulate(
-                script=[
-                    {"timestamp_ms": 0, "start": {"prompt": "Animate this", "image": frame_rgb}},
-                    {"timestamp_ms": 10000, "end": {}},
-                ]
-            )
         """
+        # Handle simple prompt list form
+        if prompts is not None:
+            script = []
+            for i, entry in enumerate(prompts):
+                timestamp_ms = i * interval
+                if i == 0:
+                    # First entry is 'start'
+                    if isinstance(entry, str):
+                        script.append({"timestamp_ms": timestamp_ms, "start": {"prompt": entry}})
+                    else:
+                        script.append({"timestamp_ms": timestamp_ms, "start": entry})
+                else:
+                    # Subsequent entries are 'interact'
+                    prompt = entry if isinstance(entry, str) else entry.get("prompt", "")
+                    script.append({"timestamp_ms": timestamp_ms, "interact": {"prompt": prompt}})
+
         await self._ensure_simulations_client()
 
         # Process scripts to convert image file paths to base64
@@ -910,6 +930,13 @@ class Odyssey:
             else:
                 # Pass through interact/end/start-without-image without modification
                 processed.append(entry)
+
+        # Auto-append end entry if missing (ergonomic improvement)
+        # The API requires scripts to end with an 'end' action, but users often forget.
+        # Rather than throwing a cryptic server error, we silently append it.
+        if processed and "end" not in processed[-1]:
+            last_timestamp = processed[-1].get("timestamp_ms", 0)
+            processed.append({"timestamp_ms": last_timestamp + 3000, "end": {}})
 
         return processed
 
