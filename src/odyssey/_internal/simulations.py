@@ -26,6 +26,28 @@ class SimulationsClient:
         self._debug = debug
         self._http_session: aiohttp.ClientSession | None = None
 
+    def _auto_append_end(self, script: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Auto-append end entry if missing (ergonomic improvement).
+
+        The API requires scripts to end with an 'end' action, but users often forget.
+        Rather than throwing a cryptic server error, we silently append it.
+
+        Args:
+            script: List of script entries.
+
+        Returns:
+            Script with end entry appended if missing.
+        """
+        if not script:
+            return script
+
+        last_entry = script[-1]
+        if "end" not in last_entry:
+            last_timestamp = last_entry.get("timestamp_ms", 0)
+            return [*script, {"timestamp_ms": last_timestamp + 3000, "end": {}}]
+
+        return script
+
     def _log(self, msg: str) -> None:
         """Log a debug message."""
         if self._debug:
@@ -84,9 +106,9 @@ class SimulationsClient:
         if script_url:
             body["script_url"] = script_url
         elif script:
-            body["script"] = script
+            body["script"] = self._auto_append_end(script)
         elif scripts:
-            body["scripts"] = scripts
+            body["scripts"] = [self._auto_append_end(s) for s in scripts]
 
         session = await self._get_http_session()
         headers = await self._get_auth_headers()
