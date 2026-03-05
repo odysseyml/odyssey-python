@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import aiohttp
@@ -13,8 +14,68 @@ from aiortc import RTCConfiguration, RTCIceCandidate, RTCIceServer, RTCPeerConne
 from aiortc.mediastreams import MediaStreamTrack
 from aiortc.sdp import candidate_from_sdp
 
-from ..exceptions import OdysseyStreamError
-from ..types import VideoFrame
+from ..exceptions import (
+    ConcurrentLimitReachedError,
+    MonthlyLimitReachedError,
+    OdysseyStreamError,
+    OdysseyUsageError,
+    StreamDurationExceededError,
+)
+from ..types import BroadcastInfo, VideoFrame
+
+# Portal URL for account management
+PORTAL_URL = "https://portal.odyssey.systems"
+
+
+class StreamErrorReason(StrEnum):
+    """Error reason codes from the server."""
+
+    QUOTA_EXCEEDED = "quota_exceeded"
+    CONCURRENT_LIMIT_EXCEEDED = "concurrent_limit_exceeded"
+    LEASE_DENIED = "lease_denied"
+    SESSION_TIMEOUT = "session_timeout"
+
+
+def _create_stream_error(reason: str, message: str) -> OdysseyStreamError | OdysseyUsageError:
+    """Map stream error reason to appropriate exception type.
+
+    Args:
+        reason: Error reason code from server (e.g., 'quota_exceeded')
+        message: Human-readable error message from server
+
+    Returns:
+        Appropriate exception type with branded formatting for usage errors
+    """
+    if reason == StreamErrorReason.QUOTA_EXCEEDED:
+        return MonthlyLimitReachedError(
+            code="MONTHLY_LIMIT_REACHED",
+            message="Monthly usage limit reached",
+            action="Upgrade your plan or wait for quota reset",
+            action_url=f"{PORTAL_URL}/dashboard",
+            details={},
+        )
+    elif reason == StreamErrorReason.CONCURRENT_LIMIT_EXCEEDED:
+        return ConcurrentLimitReachedError(
+            code="CONCURRENT_LIMIT_EXCEEDED",
+            message="Too many concurrent streams",
+            action="End an existing stream to start a new one",
+            action_url=f"{PORTAL_URL}/dashboard",
+            details={},
+        )
+    elif reason == StreamErrorReason.LEASE_DENIED:
+        # Generic lease denial - could be capacity or other transient issue
+        return OdysseyStreamError("Stream request denied - please try again")
+    elif reason == StreamErrorReason.SESSION_TIMEOUT:
+        return StreamDurationExceededError(
+            code="STREAM_DURATION_EXCEEDED",
+            message="Stream exceeded maximum duration",
+            action="Start a new stream to continue",
+            action_url=None,
+            details={},
+        )
+    else:
+        # Generic stream error for other reasons
+        return OdysseyStreamError(f"{reason}: {message}")
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +88,14 @@ class WebRTCCallbacks:
 
     on_connected: Callable[[], None] | None = None
     on_video_frame: Callable[[VideoFrame], None] | None = None
+    on_video_track_received: Callable[[], None] | None = None
     on_stream_started: Callable[[str], None] | None = None
     on_stream_ended: Callable[[], None] | None = None
     on_interact_acknowledged: Callable[[str], None] | None = None
+    on_broadcast_ready: Callable[[BroadcastInfo], None] | None = None
     on_stream_error: Callable[[str, str], None] | None = None  # reason, message
     on_error: Callable[[Exception, bool], None] | None = None
+    on_data_channel_ready: Callable[[], None] | None = None
 
 
 class WebRTCConnection:
@@ -59,6 +123,9 @@ class WebRTCConnection:
         self._stream_start_future: asyncio.Future[str] | None = None
         self._interact_future: asyncio.Future[str] | None = None
         self._stream_end_future: asyncio.Future[None] | None = None
+
+        # Last applied prompt from stream_started response
+        self._last_applied_prompt: str | None = None
 
         # Data channel state tracking
         self._data_channel_open_future: asyncio.Future[None] | None = None
@@ -107,6 +174,9 @@ class WebRTCConnection:
             self._log(f"Received track: {track.kind}")
             if track.kind == "video":
                 self._frame_task = asyncio.create_task(self._process_video_track(track))
+                # Notify that video track is received (for connection readiness)
+                if self._callbacks.on_video_track_received:
+                    self._callbacks.on_video_track_received()
 
         @self._pc.on("connectionstatechange")
         async def on_connection_state_change() -> None:
@@ -200,7 +270,7 @@ class WebRTCConnection:
                     pts = getattr(frame, "pts", None)
                     time_base = getattr(frame, "time_base", None)
                     if pts is not None and time_base is not None:
-                        timestamp_ms = int(pts * 1000 / time_base.denominator)
+                        timestamp_ms = int(pts * float(time_base) * 1000)
 
                     video_frame = VideoFrame(
                         data=img,
@@ -226,6 +296,9 @@ class WebRTCConnection:
             # Resolve the future if someone is waiting
             if self._data_channel_open_future and not self._data_channel_open_future.done():
                 self._data_channel_open_future.set_result(None)
+            # Also call the callback if set
+            if self._callbacks.on_data_channel_ready:
+                self._callbacks.on_data_channel_ready()
 
         @self._client_to_streamer_channel.on("open")  # type: ignore[untyped-decorator]
         def on_open() -> None:
@@ -265,13 +338,40 @@ class WebRTCConnection:
 
                 if msg_type == "stream_started":
                     stream_id = data.get("stream_id", "")
+                    self._last_applied_prompt = data.get("applied_prompt")
                     if self._stream_start_future and not self._stream_start_future.done():
                         self._stream_start_future.set_result(stream_id)
                     if self._callbacks.on_stream_started:
                         self._callbacks.on_stream_started(stream_id)
 
+                elif msg_type == "broadcast_ready":
+                    # Handle broadcast_ready event (sent after MediaMTX has enough frames)
+                    broadcast_url = data.get("broadcast_url")
+                    webrtc_url = data.get("webrtc_url")
+                    spectator_token = data.get("spectator_token")
+                    self._log(
+                        f"Broadcast ready: hls={broadcast_url}, "
+                        f"webrtc={webrtc_url}, token={'set' if spectator_token else 'none'}"
+                    )
+                    if not webrtc_url or not spectator_token:
+                        logger.warning("[WEBRTC] broadcast_ready missing webrtc_url or spectator_token")
+                        if self._callbacks.on_stream_error:
+                            self._callbacks.on_stream_error(
+                                "broadcast_error",
+                                "Broadcast setup incomplete: missing playback URL or token",
+                            )
+                    elif self._callbacks.on_broadcast_ready:
+                        self._log("Calling on_broadcast_ready callback")
+                        broadcast_info = BroadcastInfo(
+                            hls_url=broadcast_url,
+                            webrtc_url=webrtc_url,
+                            spectator_token=spectator_token,
+                        )
+                        self._callbacks.on_broadcast_ready(broadcast_info)
+
                 elif msg_type == "update_acknowledged":
                     prompt = data.get("prompt", "")
+                    self._last_applied_prompt = prompt or None
                     if self._interact_future and not self._interact_future.done():
                         self._interact_future.set_result(prompt)
                     if self._callbacks.on_interact_acknowledged:
@@ -288,8 +388,10 @@ class WebRTCConnection:
                     err_message = data.get("message", "Stream error occurred")
                     logger.error(f"Interactive stream error: {reason} - {err_message}")
 
+                    # Create appropriate exception type based on reason
+                    stream_err = _create_stream_error(reason, err_message)
+
                     # Reject pending futures with exception
-                    stream_err = OdysseyStreamError(f"{reason}: {err_message}")
                     if self._stream_start_future and not self._stream_start_future.done():
                         self._stream_start_future.set_exception(stream_err)
                     if self._interact_future and not self._interact_future.done():
@@ -366,12 +468,13 @@ class WebRTCConnection:
                 await self._frame_task
             self._frame_task = None
 
-        # Clear futures
+        # Clear futures and state
         self._stream_start_future = None
         self._interact_future = None
         self._stream_end_future = None
         self._data_channel_open_future = None
         self._data_channel_open = False
+        self._last_applied_prompt = None
 
         # Close data channels
         self._client_to_streamer_channel = None
@@ -381,6 +484,11 @@ class WebRTCConnection:
         if self._pc:
             await self._pc.close()
             self._pc = None
+
+    @property
+    def last_applied_prompt(self) -> str | None:
+        """The rewritten prompt from the last stream_started response."""
+        return self._last_applied_prompt
 
     @property
     def is_data_channel_open(self) -> bool:
@@ -410,6 +518,6 @@ class WebRTCConnection:
             self._log(f"Waiting for data channel to open (timeout={timeout}s)...")
             await asyncio.wait_for(self._data_channel_open_future, timeout=timeout)
             self._log("Data channel is now open")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._log("Timeout waiting for data channel to open")
             raise

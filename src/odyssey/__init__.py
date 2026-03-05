@@ -29,8 +29,21 @@ Example:
 
 from .client import Odyssey, OdysseyEventHandlers
 from .config import AdvancedConfig, ClientConfig, DevConfig
-from .exceptions import OdysseyAuthError, OdysseyConnectionError, OdysseyError, OdysseyStreamError
+from .exceptions import (
+    AccountSuspendedError,
+    ConcurrentLimitReachedError,
+    MonthlyLimitReachedError,
+    OdysseyAuthError,
+    OdysseyConnectionError,
+    OdysseyError,
+    OdysseyStreamError,
+    OdysseyUsageError,
+    RateLimitError,
+    StreamDurationExceededError,
+)
 from .types import (
+    BroadcastInfo,
+    BroadcastReadyCallback,
     ConnectedCallback,
     ConnectionStatus,
     DisconnectedCallback,
@@ -42,6 +55,7 @@ from .types import (
     SimulationJobsList,
     SimulationJobStatus,
     SimulationStream,
+    SpectatorConnection,
     StatusChangeCallback,
     StreamEndedCallback,
     StreamErrorCallback,
@@ -56,11 +70,21 @@ __all__ = [
     # Main client
     "Odyssey",
     "OdysseyEventHandlers",
+    # Spectator playback
+    "connect_to_stream",
+    "SpectatorConnection",
     # Exceptions
     "OdysseyError",
     "OdysseyAuthError",
     "OdysseyConnectionError",
     "OdysseyStreamError",
+    # Usage/Account Limit Errors (with branded ASCII art)
+    "OdysseyUsageError",
+    "MonthlyLimitReachedError",
+    "ConcurrentLimitReachedError",
+    "StreamDurationExceededError",
+    "AccountSuspendedError",
+    "RateLimitError",
     # Configuration
     "ClientConfig",
     "DevConfig",
@@ -71,6 +95,7 @@ __all__ = [
     "Recording",
     "StreamRecordingInfo",
     "StreamRecordingsList",
+    "BroadcastInfo",
     # Simulation types
     "SimulationJobStatus",
     "SimulationStream",
@@ -85,8 +110,66 @@ __all__ = [
     "StreamEndedCallback",
     "StreamErrorCallback",
     "InteractAcknowledgedCallback",
+    "BroadcastReadyCallback",
     "ErrorCallback",
     "StatusChangeCallback",
 ]
 
-__version__ = "1.0.0"
+__version__ = "0.1.0"
+
+
+async def connect_to_stream(
+    webrtc_url: str,
+    spectator_token: str,
+    on_video_frame: VideoFrameCallback | None = None,
+    on_disconnected: DisconnectedCallback | None = None,
+    debug: bool = False,
+) -> SpectatorConnection:
+    """Connect to a broadcast stream as a spectator using WHEP.
+
+    This function creates a receive-only WebRTC connection to view a
+    broadcast stream without requiring a full Odyssey client instance.
+    Use this when you have the webrtc_url and spectator_token from an
+    on_broadcast_ready callback.
+
+    Args:
+        webrtc_url: The WebRTC/WHEP base URL from on_broadcast_ready.
+        spectator_token: Authentication token for spectator access.
+        on_video_frame: Callback invoked for each received video frame.
+        on_disconnected: Callback invoked when the connection ends.
+        debug: Enable debug logging.
+
+    Returns:
+        SpectatorConnection for managing the playback session.
+
+    Raises:
+        ValueError: If the spectator token is invalid (401).
+        ConnectionError: If the stream is not found (404) or connection fails.
+
+    Example:
+        ```python
+        from odyssey import connect_to_stream
+
+        def handle_frame(frame):
+            cv2.imshow("Broadcast", frame.data)
+            cv2.waitKey(1)
+
+        connection = await connect_to_stream(
+            webrtc_url="http://localhost:8889/live/stream123",
+            spectator_token="spectator_abc...",
+            on_video_frame=handle_frame,
+        )
+
+        # Later:
+        await connection.disconnect()
+        ```
+    """
+    from ._internal.whep import WhepConnection
+
+    whep = WhepConnection(
+        on_video_frame=on_video_frame,
+        on_disconnected=on_disconnected,
+        debug=debug,
+    )
+    await whep.connect(webrtc_url, spectator_token)
+    return SpectatorConnection(_whep=whep)

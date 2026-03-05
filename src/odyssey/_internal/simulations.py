@@ -41,7 +41,7 @@ class SimulationsClient:
         """Get authorization headers."""
         await self._auth.exchange_api_key_for_token()
         return {
-            "Authorization": f"Bearer {self._auth._auth_token}",
+            "Authorization": f"Bearer {self._auth.auth_token}",
             "Content-Type": "application/json",
         }
 
@@ -52,6 +52,7 @@ class SimulationsClient:
         scripts: list[list[dict[str, Any]]] | None = None,
         script_url: str | None = None,
         portrait: bool = True,
+        bypass_prompt_expansion: bool | None = None,
     ) -> dict[str, Any]:
         """Submit a simulation job.
 
@@ -60,6 +61,7 @@ class SimulationsClient:
             scripts: Batch mode - multiple scripts.
             script_url: URL to script JSON file.
             portrait: Portrait (True) or landscape (False).
+            bypass_prompt_expansion: Skip prompt expansion (requires privilege).
 
         Returns:
             Dict with job info including job_id.
@@ -80,6 +82,8 @@ class SimulationsClient:
             "portrait": portrait,
             "output_video": True,
         }
+        if bypass_prompt_expansion is not None:
+            body["bypass_vlm_expansion"] = bypass_prompt_expansion
 
         if script_url:
             body["script_url"] = script_url
@@ -97,7 +101,7 @@ class SimulationsClient:
                 error_text = await response.text()
                 raise ConnectionError(f"Failed to submit simulation: {response.status} {error_text}")
 
-            return await response.json()
+            return await response.json()  # type: ignore[no-any-return]
 
     async def get_status(self, job_id: str) -> dict[str, Any]:
         """Get the status of a simulation job.
@@ -126,7 +130,7 @@ class SimulationsClient:
             if not response.ok:
                 raise ConnectionError(f"Failed to get simulation status: {response.status} {response.reason}")
 
-            return await response.json()
+            return await response.json()  # type: ignore[no-any-return]
 
     async def list_jobs(
         self,
@@ -184,7 +188,7 @@ class SimulationsClient:
             if not response.ok:
                 raise ConnectionError(f"Failed to list simulations: {response.status} {response.reason}")
 
-            return await response.json()
+            return await response.json()  # type: ignore[no-any-return]
 
     async def cancel_job(self, job_id: str) -> dict[str, Any]:
         """Cancel a pending or dispatched simulation job.
@@ -219,7 +223,7 @@ class SimulationsClient:
             if not response.ok:
                 raise ConnectionError(f"Failed to cancel simulation: {response.status} {response.reason}")
 
-            return await response.json()
+            return await response.json()  # type: ignore[no-any-return]
 
     async def close(self) -> None:
         """Close HTTP session."""

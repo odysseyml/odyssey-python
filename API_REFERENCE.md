@@ -40,7 +40,7 @@ uv pip install git+https://github.com/odysseyml/odyssey-python.git
 |-----------|-------------|
 | `connect(**handlers) -> None` | Connect to a streaming session (raises on failure) |
 | `disconnect() -> None` | Disconnect and clean up resources |
-| `start_stream(prompt, portrait?, image?, image_path?) -> str` | Start an interactive stream |
+| `start_stream(prompt, portrait?, image?, image_path?, bypass_prompt_expansion?, broadcast?) -> str` | Start an interactive stream |
 | `interact(prompt) -> str` | Send a prompt to update the video |
 | `end_stream() -> None` | End the current stream session |
 | `get_recording(stream_id) -> Recording` | Get recording URLs for a stream |
@@ -50,10 +50,16 @@ uv pip install git+https://github.com/odysseyml/odyssey-python.git
 
 | Signature | Description |
 |-----------|-------------|
-| `simulate(script?, scripts?, script_url?, portrait?) -> SimulationJobDetail` | Submit an async simulation job |
+| `simulate(script?, scripts?, script_url?, portrait?, bypass_prompt_expansion?) -> SimulationJobDetail` | Submit an async simulation job |
 | `get_simulate_status(job_id) -> SimulationJobDetail` | Get job status and output URLs |
 | `list_simulations(status?, active?, limit?, offset?) -> SimulationJobsList` | List user's simulation jobs |
 | `cancel_simulation(job_id) -> SimulationJobInfo` | Cancel a pending/dispatched job |
+
+### Spectator Playback (Standalone Function)
+
+| Signature | Description |
+|-----------|-------------|
+| `connect_to_stream(webrtc_url, spectator_token, on_video_frame?, on_disconnected?, debug?) -> SpectatorConnection` | Connect to a broadcast stream as a spectator via WHEP |
 
 ### Properties
 
@@ -62,6 +68,7 @@ uv pip install git+https://github.com/odysseyml/odyssey-python.git
 | `is_connected` | `bool` | Whether connected and ready |
 | `current_status` | `ConnectionStatus` | Current connection status |
 | `current_session_id` | `str \| None` | Current session ID |
+| `last_applied_prompt` | `str \| None` | Rewritten prompt in use by the streamer (updated after `start_stream()` and `interact()`) |
 
 ### Event Handlers
 
@@ -72,6 +79,7 @@ uv pip install git+https://github.com/odysseyml/odyssey-python.git
 | `on_video_frame` | `frame: VideoFrame` | Video frame received |
 | `on_stream_started` | `stream_id: str` | Interactive stream ready |
 | `on_stream_ended` | - | Interactive stream ended |
+| `on_broadcast_ready` | `info: BroadcastInfo` | Broadcast URLs available (when `broadcast=True`) |
 | `on_interact_acknowledged` | `prompt: str` | Interaction processed |
 | `on_stream_error` | `reason, message` | Stream error occurred |
 | `on_error` | `error: Exception, fatal: bool` | General error |
@@ -158,6 +166,7 @@ async def connect(
     on_stream_started: Callable[[str], None] | None = None,
     on_stream_ended: Callable[[], None] | None = None,
     on_interact_acknowledged: Callable[[str], None] | None = None,
+    on_broadcast_ready: Callable[[BroadcastInfo], None] | None = None,
     on_stream_error: Callable[[str, str], None] | None = None,
     on_error: Callable[[Exception, bool], None] | None = None,
     on_status_change: Callable[[ConnectionStatus, str | None], None] | None = None,
@@ -173,6 +182,7 @@ async def connect(
 | `on_video_frame` | `Callable[[VideoFrame], None]` | Called for each video frame |
 | `on_stream_started` | `Callable[[str], None]` | Called when stream starts |
 | `on_stream_ended` | `Callable[[], None]` | Called when stream ends |
+| `on_broadcast_ready` | `Callable[[BroadcastInfo], None]` | Called when broadcast URLs are available (requires `broadcast=True` in `start_stream`) |
 | `on_interact_acknowledged` | `Callable[[str], None]` | Called when interaction is acknowledged |
 | `on_stream_error` | `Callable[[str, str], None]` | Called on stream error (reason, message) |
 | `on_error` | `Callable[[Exception, bool], None]` | Called on error (error, fatal) |
@@ -218,9 +228,9 @@ await client.disconnect()
 
 ---
 
-#### `start_stream(prompt, portrait?, image?, image_path?)`
+#### `start_stream(prompt, portrait?, image?, image_path?, bypass_prompt_expansion?, broadcast?)`
 
-Start an interactive stream session. Optionally provide an image for image-to-video (i2v) generation.
+Start an interactive stream session. Optionally provide an image for image-to-video (i2v) generation, or enable broadcast mode for spectators.
 
 ```python
 async def start_stream(
@@ -228,6 +238,8 @@ async def start_stream(
     portrait: bool = True,
     image: str | bytes | PIL.Image.Image | np.ndarray | None = None,
     image_path: str | None = None,  # Deprecated
+    bypass_prompt_expansion: bool | None = None,
+    broadcast: bool = False,
 ) -> str
 ```
 
@@ -239,6 +251,8 @@ async def start_stream(
 | `portrait` | `bool` | `True` | `True` for portrait (704x1280), `False` for landscape (1280x704) |
 | `image` | `Any \| None` | `None` | Image for i2v generation (see supported formats below) |
 | `image_path` | `str \| None` | `None` | **Deprecated.** Use `image` instead. Path to local image file. |
+| `bypass_prompt_expansion` | `bool \| None` | `None` | Skip prompt expansion (safety-only mode). Requires the expansion bypass privilege; the stream will fail to start if set without it. |
+| `broadcast` | `bool` | `False` | Enable broadcast mode for spectators (HLS/WebRTC playback) |
 
 **Supported Image Formats:**
 
@@ -261,6 +275,9 @@ async def start_stream(
 # Text-to-video
 stream_id = await client.start_stream("A cat sleeping", portrait=True)
 
+# Check the rewritten prompt
+print(client.last_applied_prompt)
+
 # Image-to-video with file path
 stream_id = await client.start_stream(
     prompt="The robot starts dancing",
@@ -276,6 +293,12 @@ stream_id = await client.start_stream(prompt="Robot dancing", image=img)
 # Image-to-video with numpy array (e.g., from OpenCV)
 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 stream_id = await client.start_stream(prompt="Animate this", image=frame_rgb)
+
+# Bypass prompt expansion (requires the expansion bypass privilege)
+stream_id = await client.start_stream(
+    prompt="A cat sleeping",
+    bypass_prompt_expansion=True,
+)
 ```
 
 ---
@@ -390,7 +413,7 @@ print(f"Total: {result.total}")
 
 ---
 
-#### `simulate(script?, scripts?, script_url?, portrait?)`
+#### `simulate(script?, scripts?, script_url?, portrait?, bypass_prompt_expansion?)`
 
 Submit an asynchronous simulation job. Simulations generate video server-side without requiring a live WebRTC connection.
 
@@ -401,6 +424,7 @@ async def simulate(
     scripts: list[list[dict]] | None = None,
     script_url: str | None = None,
     portrait: bool = True,
+    bypass_prompt_expansion: bool | None = None,
 ) -> SimulationJobDetail
 ```
 
@@ -412,6 +436,7 @@ async def simulate(
 | `scripts` | `list[list[dict]] \| None` | `None` | Batch mode - multiple scripts |
 | `script_url` | `str \| None` | `None` | URL to script JSON file |
 | `portrait` | `bool` | `True` | `True` for portrait (704x1280), `False` for landscape (1280x704) |
+| `bypass_prompt_expansion` | `bool \| None` | `None` | Skip prompt expansion (safety-only mode). Requires the expansion bypass privilege; returns 403 if set without it. |
 
 **Script Format:**
 
@@ -634,6 +659,113 @@ Current session ID, or `None` if not connected.
 
 ---
 
+#### `last_applied_prompt`
+
+```python
+@property
+def last_applied_prompt(self) -> str | None
+```
+
+The rewritten prompt currently in use by the streamer. Updated after `start_stream()` and `interact()` return. Returns `None` if no stream has been started or the streamer did not include the applied prompt.
+
+**Example:**
+
+```python
+await client.start_stream("A cat on a windowsill")
+print(client.last_applied_prompt)
+# e.g. "A fluffy orange tabby cat lounging on a sun-drenched windowsill..."
+
+await client.interact("The cat jumps down")
+print(client.last_applied_prompt)
+# e.g. "The fluffy orange tabby leaps gracefully from the windowsill..."
+```
+
+---
+
+## Spectator Playback
+
+### `connect_to_stream()`
+
+Connect to a broadcast stream as a spectator using WHEP (WebRTC-HTTP Egress Protocol). This is a standalone function that doesn't require an Odyssey client instance.
+
+```python
+async def connect_to_stream(
+    webrtc_url: str,
+    spectator_token: str,
+    on_video_frame: Callable[[VideoFrame], None] | None = None,
+    on_disconnected: Callable[[], None] | None = None,
+    debug: bool = False,
+) -> SpectatorConnection
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `webrtc_url` | `str` | WebRTC/WHEP base URL from `on_broadcast_ready` |
+| `spectator_token` | `str` | Authentication token for spectator access |
+| `on_video_frame` | `Callable[[VideoFrame], None]` | Callback for each video frame |
+| `on_disconnected` | `Callable[[], None]` | Callback when connection ends |
+| `debug` | `bool` | Enable debug logging |
+
+**Returns:** `SpectatorConnection` - Handle for managing the playback session.
+
+**Raises:**
+- `ValueError` - If spectator token is invalid (401)
+- `ConnectionError` - If stream not found (404) or connection fails
+
+**Example:**
+
+```python
+from odyssey import connect_to_stream
+import cv2
+
+def handle_frame(frame):
+    cv2.imshow("Broadcast", cv2.cvtColor(frame.data, cv2.COLOR_RGB2BGR))
+    cv2.waitKey(1)
+
+# Connect as spectator (no Odyssey client needed)
+connection = await connect_to_stream(
+    webrtc_url="http://localhost:8889/live/stream123",
+    spectator_token="spectator_abc...",
+    on_video_frame=handle_frame,
+)
+
+# Keep watching...
+await asyncio.sleep(60)
+
+# Disconnect when done
+await connection.disconnect()
+```
+
+---
+
+### SpectatorConnection
+
+Handle for an active spectator connection. Returned by `connect_to_stream()`.
+
+```python
+@dataclass(frozen=True, slots=True)
+class SpectatorConnection:
+    @property
+    def is_connected(self) -> bool: ...
+    async def disconnect(self) -> None: ...
+```
+
+**Properties:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `is_connected` | `bool` | Whether the connection is active |
+
+**Methods:**
+
+| Method | Description |
+|--------|-------------|
+| `disconnect()` | Close the connection and clean up resources |
+
+---
+
 ## Types & Interfaces
 
 ### VideoFrame
@@ -661,6 +793,37 @@ def on_frame(frame: VideoFrame) -> None:
 
     # Headless processing
     processed = some_ml_model(frame.data)
+```
+
+---
+
+### BroadcastInfo
+
+Broadcast playback URLs for spectators, received via the `on_broadcast_ready` callback when `broadcast=True` is passed to `start_stream()`.
+
+```python
+@dataclass(frozen=True, slots=True)
+class BroadcastInfo:
+    hls_url: str | None   # HLS playback URL (wider compatibility, may be None if HLS disabled)
+    webrtc_url: str        # WebRTC/WHEP playback URL (lowest latency)
+    spectator_token: str   # Authentication token for spectator access
+```
+
+**Usage:**
+
+When broadcast mode is enabled, the server pushes the stream to MediaMTX which provides both WebRTC (WHEP) and HLS playback URLs. Spectators can watch without a direct connection to Odyssey.
+
+- **WebRTC/WHEP**: Low latency (~1s), requires modern browser with WebRTC support
+- **HLS**: Higher latency (~5-10s), wider device/browser compatibility
+
+```python
+def on_broadcast_ready(info: BroadcastInfo) -> None:
+    print(f"WebRTC: {info.webrtc_url}")
+    print(f"HLS: {info.hls_url}")
+    print(f"Token: {info.spectator_token}")
+
+await client.connect(on_broadcast_ready=on_broadcast_ready)
+await client.start_stream("A cat", broadcast=True)
 ```
 
 ---
@@ -965,6 +1128,61 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Broadcast Mode (Spectator Streaming)
+
+Enable broadcast mode to allow spectators to watch the stream via WebRTC or HLS without a direct Odyssey connection.
+
+```python
+import asyncio
+from odyssey import Odyssey, BroadcastInfo, OdysseyConnectionError
+
+async def main():
+    client = Odyssey(api_key="ody_your_api_key_here")
+    broadcast_urls = {}
+
+    def on_broadcast_ready(info: BroadcastInfo) -> None:
+        broadcast_urls["webrtc"] = info.webrtc_url
+        broadcast_urls["hls"] = info.hls_url
+        broadcast_urls["token"] = info.spectator_token
+        print(f"Spectators can watch at:")
+        print(f"  WebRTC: {info.webrtc_url}")
+        print(f"  HLS: {info.hls_url}")
+        print(f"  Token: {info.spectator_token}")
+
+    try:
+        await client.connect(
+            on_video_frame=lambda frame: None,  # Host receives frames
+            on_broadcast_ready=on_broadcast_ready,
+        )
+
+        # Start stream with broadcast enabled
+        stream_id = await client.start_stream(
+            prompt="A beautiful sunset over mountains",
+            portrait=False,
+            broadcast=True,  # Enable broadcast for spectators
+        )
+        print(f"Stream started: {stream_id}")
+
+        # Keep streaming - spectators can join via broadcast URLs
+        await asyncio.sleep(60)
+
+        await client.end_stream()
+    except OdysseyConnectionError as e:
+        print(f"Connection failed: {e}")
+    finally:
+        await client.disconnect()
+
+asyncio.run(main())
+```
+
+**Note:** Broadcast mode requires MediaMTX to be running. Set the following environment variables on the streamer:
+- `ODYSSEY_ENABLE_BROADCAST=true`
+- `ODYSSEY_MEDIAMTX_RTMP_URL` - RTMP ingest URL
+- `ODYSSEY_MEDIAMTX_PLAYBACK_URL` - HLS playback base URL
+- `ODYSSEY_MEDIAMTX_WEBRTC_URL` - WebRTC playback base URL
+
+---
 
 ### Simulation Job
 

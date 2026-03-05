@@ -101,6 +101,23 @@ frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 await client.start_stream(prompt="Animate this", image=frame_rgb)
 ```
 
+## Broadcast Mode (Spectators)
+
+Enable broadcast to allow spectators to watch via WebRTC/HLS without a direct Odyssey connection:
+
+```python
+from odyssey import Odyssey, BroadcastInfo
+
+def on_broadcast_ready(info: BroadcastInfo) -> None:
+    print(f"WebRTC: {info.webrtc_url}")
+    print(f"HLS: {info.hls_url}")
+
+await client.connect(on_broadcast_ready=on_broadcast_ready)
+await client.start_stream("A sunset", broadcast=True)
+```
+
+**Note:** Requires MediaMTX running with `ODYSSEY_ENABLE_BROADCAST=true` on the streamer.
+
 ## Requirements
 
 - Python 3.12+
@@ -154,7 +171,7 @@ asyncio.run(main())
 |--------|-------------|
 | `connect(**handlers)` | Connect to a streaming session (raises on failure) |
 | `disconnect()` | Disconnect and clean up resources |
-| `start_stream(prompt, portrait?, image?, image_path?)` | Start an interactive stream |
+| `start_stream(prompt, portrait?, image?, broadcast?)` | Start an interactive stream |
 | `interact(prompt)` | Send a prompt to update the video |
 | `end_stream()` | End the current stream session |
 | `get_recording(stream_id)` | Get recording URLs for a stream |
@@ -195,6 +212,7 @@ asyncio.run(main())
 | `on_video_frame` | `frame: VideoFrame` | Video frame received |
 | `on_stream_started` | `stream_id: str` | Interactive stream ready |
 | `on_stream_ended` | - | Interactive stream ended |
+| `on_broadcast_ready` | `info: BroadcastInfo` | Broadcast URLs available |
 | `on_interact_acknowledged` | `prompt: str` | Interaction processed |
 | `on_stream_error` | `reason, message` | Stream error occurred |
 | `on_error` | `error, fatal` | Transient error occurred |
@@ -209,6 +227,16 @@ class VideoFrame:
     width: int
     height: int
     timestamp_ms: int
+```
+
+### BroadcastInfo
+
+```python
+@dataclass
+class BroadcastInfo:
+    hls_url: str | None           # HLS playback URL (may be None if HLS disabled)
+    webrtc_url: str | None        # WebRTC/WHEP playback URL
+    spectator_token: str | None   # Authentication token for spectator access
 ```
 
 ## Links

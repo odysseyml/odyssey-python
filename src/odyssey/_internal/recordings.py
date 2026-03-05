@@ -40,7 +40,7 @@ class RecordingsClient:
     async def _get_auth_headers(self) -> dict[str, str]:
         """Get authorization headers."""
         await self._auth.exchange_api_key_for_token()
-        return {"Authorization": f"Bearer {self._auth._auth_token}"}
+        return {"Authorization": f"Bearer {self._auth.auth_token}"}
 
     async def get_recording(self, stream_id: str) -> dict[str, Any]:
         """Get recording data for a stream.
@@ -69,7 +69,7 @@ class RecordingsClient:
             if not response.ok:
                 raise ConnectionError(f"Failed to get recording: {response.status} {response.reason}")
 
-            return await response.json()
+            return await response.json()  # type: ignore[no-any-return]
 
     async def list_stream_recordings(self, limit: int | None = None, offset: int | None = None) -> dict[str, Any]:
         """List stream recordings for the authenticated user.
@@ -108,7 +108,7 @@ class RecordingsClient:
             if not response.ok:
                 raise ConnectionError(f"Failed to list stream recordings: {response.status} {response.reason}")
 
-            return await response.json()
+            return await response.json()  # type: ignore[no-any-return]
 
     async def close(self) -> None:
         """Close HTTP session."""

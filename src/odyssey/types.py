@@ -1,11 +1,17 @@
 """Type definitions for the Odyssey client library."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from ._internal.whep import WhepConnection
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +36,24 @@ class VideoFrame:
     width: int
     height: int
     timestamp_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastInfo:
+    """Broadcast URLs and token for spectator viewing.
+
+    When broadcast mode is enabled, these URLs allow spectators to watch
+    the stream without participating in the interactive session.
+
+    Attributes:
+        hls_url: HLS playlist URL for broad compatibility (~5-10s latency). May be None if HLS disabled.
+        webrtc_url: WebRTC/WHEP URL for low-latency viewing (~1s latency).
+        spectator_token: Token for authenticated broadcast playback.
+    """
+
+    hls_url: str | None
+    webrtc_url: str
+    spectator_token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,12 +265,63 @@ class SimulationJobsList:
     offset: int
 
 
+@dataclass(frozen=True, slots=True)
+class SpectatorConnection:
+    """Active spectator connection to a broadcast stream.
+
+    This class wraps a WHEP-based WebRTC connection for viewing
+    broadcast streams. Use connect_to_stream() to create instances.
+
+    Example:
+        ```python
+        from odyssey import connect_to_stream
+
+        def handle_frame(frame):
+            cv2.imshow("Broadcast", frame.data)
+            cv2.waitKey(1)
+
+        connection = await connect_to_stream(
+            webrtc_url="http://localhost:8889/live/stream123",
+            spectator_token="spectator_abc...",
+            on_video_frame=handle_frame,
+        )
+
+        # Later:
+        await connection.disconnect()
+        ```
+    """
+
+    _whep: WhepConnection
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if the connection is currently active."""
+        return self._whep.is_connected
+
+    @property
+    def peer_connection(self) -> object | None:
+        """The underlying RTCPeerConnection, or None if not connected.
+
+        Useful for collecting WebRTC stats via ``pc.getStats()``.
+        Returns an opaque object to avoid coupling callers to aiortc internals.
+        """
+        return self._whep.peer_connection
+
+    async def disconnect(self) -> None:
+        """Disconnect from the broadcast stream.
+
+        Call this when done viewing to clean up resources.
+        """
+        await self._whep.close()
+
+
 # Type aliases for callbacks
 type VideoFrameCallback = Callable[[VideoFrame], None]
 type StreamStartedCallback = Callable[[str], None]  # stream_id
 type StreamEndedCallback = Callable[[], None]
 type StreamErrorCallback = Callable[[str, str], None]  # reason, message
 type InteractAcknowledgedCallback = Callable[[str], None]  # prompt
+type BroadcastReadyCallback = Callable[[BroadcastInfo], None]  # broadcast_info
 type ErrorCallback = Callable[[Exception, bool], None]  # error, fatal
 type StatusChangeCallback = Callable[[ConnectionStatus, str | None], None]  # status, message
 type ConnectedCallback = Callable[[], None]

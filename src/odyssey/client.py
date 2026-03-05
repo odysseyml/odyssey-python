@@ -8,11 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._internal import AuthClient, RecordingsClient, SignalingClient, SimulationsClient, WebRTCConnection
+from ._internal import AuthClient, RecordingsClient, SessionClient, SignalingClient, SimulationsClient, WebRTCConnection
 from ._internal.webrtc import WebRTCCallbacks
 from .config import ClientConfig
 from .exceptions import OdysseyAuthError, OdysseyConnectionError, OdysseyStreamError
 from .types import (
+    BroadcastReadyCallback,
     ConnectedCallback,
     ConnectionStatus,
     DisconnectedCallback,
@@ -50,6 +51,7 @@ class OdysseyEventHandlers:
     on_stream_started: StreamStartedCallback | None = None
     on_stream_ended: StreamEndedCallback | None = None
     on_interact_acknowledged: InteractAcknowledgedCallback | None = None
+    on_broadcast_ready: BroadcastReadyCallback | None = None
     on_stream_error: StreamErrorCallback | None = None
     on_error: ErrorCallback | None = None
     on_status_change: StatusChangeCallback | None = None
@@ -101,6 +103,7 @@ class Odyssey:
 
         # Internal clients
         self._auth: AuthClient | None = None
+        self._session: SessionClient | None = None
         self._signaling: SignalingClient | None = None
         self._webrtc: WebRTCConnection | None = None
         self._recordings: RecordingsClient | None = None
@@ -112,6 +115,14 @@ class Odyssey:
         # Connect future - stores exception on failure
         self._connect_future: asyncio.Future[None] | None = None
         self._connect_error: Exception | None = None
+
+        # Connection readiness tracking (matches JavaScript behavior)
+        # connect() only resolves when BOTH conditions are met:
+        # 1. Video track received (confirms media negotiation complete)
+        # 2. Data channel ready (confirms we can send messages)
+        self._video_received = False  # Set when video track is received
+        self._data_channel_ready = False
+        self._has_called_on_connected = False
 
     def _log(self, msg: str) -> None:
         """Log a debug message."""
@@ -130,12 +141,10 @@ class Odyssey:
         if self._handlers.on_status_change:
             self._handlers.on_status_change(status, message)
 
-        # Resolve connect future when connection completes or fails
-        if self._connect_future and not self._connect_future.done():
-            if status == ConnectionStatus.CONNECTED:
-                self._connect_future.set_result(None)
-            elif status == ConnectionStatus.FAILED:
-                self._connect_future.set_result(None)  # Error stored in _connect_error
+        # Resolve connect future on failure only
+        # Success is handled by _check_connection_ready() when both video and data channel are ready
+        if self._connect_future and not self._connect_future.done() and status == ConnectionStatus.FAILED:
+            self._connect_future.set_result(None)  # Error stored in _connect_error
 
     async def connect(
         self,
@@ -145,6 +154,7 @@ class Odyssey:
         on_stream_started: StreamStartedCallback | None = None,
         on_stream_ended: StreamEndedCallback | None = None,
         on_interact_acknowledged: InteractAcknowledgedCallback | None = None,
+        on_broadcast_ready: BroadcastReadyCallback | None = None,
         on_stream_error: StreamErrorCallback | None = None,
         on_error: ErrorCallback | None = None,
         on_status_change: StatusChangeCallback | None = None,
@@ -158,6 +168,7 @@ class Odyssey:
             on_stream_started: Called when the interactive stream starts.
             on_stream_ended: Called when the interactive stream ends.
             on_interact_acknowledged: Called when an interaction is acknowledged.
+            on_broadcast_ready: Called when broadcast URLs are available (if broadcast=True).
             on_stream_error: Called when a stream error occurs (reason, message).
             on_error: Called on transient errors during streaming.
             on_status_change: Called when connection status changes.
@@ -189,6 +200,7 @@ class Odyssey:
             on_stream_started=on_stream_started,
             on_stream_ended=on_stream_ended,
             on_interact_acknowledged=on_interact_acknowledged,
+            on_broadcast_ready=on_broadcast_ready,
             on_stream_error=on_stream_error,
             on_error=on_error,
             on_status_change=on_status_change,
@@ -210,11 +222,16 @@ class Odyssey:
                 self._auth = AuthClient(
                     api_key=self._config.api_key,
                     api_url=self._config.api_url,
+                    debug=self._config.dev.debug,
+                )
+                self._session = SessionClient(
+                    auth=self._auth,
+                    api_url=self._config.api_url,
                     queue_timeout_s=self._config.advanced.queue_timeout_s,
                     debug=self._config.dev.debug,
                 )
 
-                session_info = await self._auth.request_session()
+                session_info = await self._session.request_session()
 
                 self._session_id = session_info.session_id
                 self._current_signaling_url = session_info.signaling_url
@@ -224,6 +241,7 @@ class Odyssey:
             except Exception as e:
                 error_msg = str(e)
                 # Determine if this is an auth error or connection error
+                err: OdysseyAuthError | OdysseyConnectionError
                 if "401" in error_msg or "403" in error_msg or "invalid" in error_msg.lower():
                     err = OdysseyAuthError(error_msg)
                 else:
@@ -242,8 +260,18 @@ class Odyssey:
         # Attempt connection
         await self._attempt_connection()
 
-        # Wait for connection to complete
-        await self._connect_future
+        # Wait for connection to complete with timeout
+        try:
+            await asyncio.wait_for(self._connect_future, timeout=30.0)
+        except TimeoutError:
+            pending = []
+            if not self._video_received:
+                pending.append("video_track")
+            if not self._data_channel_ready:
+                pending.append("data_channel")
+            error_msg = f"Connection timed out waiting for: {', '.join(pending)}"
+            self._error(error_msg)
+            raise OdysseyConnectionError(error_msg) from None
 
         # Check if connection failed
         if self._status == ConnectionStatus.FAILED:
@@ -255,12 +283,12 @@ class Odyssey:
         if self._webrtc:
             try:
                 await self._webrtc.wait_for_data_channel_open(timeout=30.0)
-            except asyncio.TimeoutError:
-                err = OdysseyConnectionError("Timeout waiting for data channel to open")
-                self._set_status(ConnectionStatus.FAILED, str(err), error=err)
+            except TimeoutError as timeout_err:
+                dc_err = OdysseyConnectionError("Timeout waiting for data channel to open")
+                self._set_status(ConnectionStatus.FAILED, str(dc_err), error=dc_err)
                 if self._handlers.on_error:
-                    self._handlers.on_error(err, True)
-                raise err
+                    self._handlers.on_error(dc_err, True)
+                raise dc_err from timeout_err
 
     async def _attempt_connection(self) -> None:
         """Attempt to establish connection."""
@@ -268,6 +296,11 @@ class Odyssey:
 
         if not self._current_signaling_url:
             raise ValueError("No signaling URL")
+
+        # Reset connection readiness tracking for new connection attempt
+        self._video_received = False
+        self._data_channel_ready = False
+        self._has_called_on_connected = False
 
         self._set_status(ConnectionStatus.CONNECTING)
 
@@ -278,11 +311,14 @@ class Odyssey:
                 WebRTCCallbacks(
                     on_connected=self._on_webrtc_connected,
                     on_video_frame=self._handlers.on_video_frame,
+                    on_video_track_received=self._on_video_track_received,
                     on_stream_started=self._handlers.on_stream_started,
                     on_stream_ended=self._handlers.on_stream_ended,
                     on_interact_acknowledged=self._handlers.on_interact_acknowledged,
+                    on_broadcast_ready=self._handlers.on_broadcast_ready,
                     on_stream_error=self._handlers.on_stream_error,
                     on_error=self._handlers.on_error,
+                    on_data_channel_ready=self._on_data_channel_ready,
                 )
             )
 
@@ -300,10 +336,10 @@ class Odyssey:
             self._signaling.on("ice_candidate", self._handle_ice_candidate)
             self._signaling.on("error", self._handle_signaling_error)
 
-            # Get session token if we have auth client
+            # Get session token if we have session client
             session_token = None
-            if self._auth and self._session_id:
-                session_token = await self._auth.fetch_session_token(self._session_id)
+            if self._session and self._session_id:
+                session_token = await self._session.fetch_session_token(self._session_id)
 
             # Connect to signaling server
             await self._signaling.connect(
@@ -339,8 +375,57 @@ class Odyssey:
                     self._handlers.on_error(err, True)
 
     def _on_webrtc_connected(self) -> None:
-        """Handle WebRTC connection established."""
+        """Handle WebRTC peer connection established.
+
+        Note: This is called when WebRTC connection state becomes 'connected',
+        but we don't resolve connect() here. We wait for both video frame AND
+        data channel to be ready (matching JavaScript client behavior).
+        """
+        self._log("WebRTC peer connection established")
+        # Don't resolve connect() yet - wait for _check_connection_ready()
+
+    def _on_data_channel_ready(self) -> None:
+        """Handle data channel becoming ready."""
+        self._log("Data channel ready")
+        self._data_channel_ready = True
+        self._check_connection_ready()
+
+    def _on_video_track_received(self) -> None:
+        """Handle video track being received."""
+        self._log("Video track received")
+        self._video_received = True
+        self._check_connection_ready()
+
+    def _check_connection_ready(self) -> None:
+        """Check if connection is fully ready and resolve connect() if so.
+
+        Connection is ready when BOTH conditions are met:
+        1. Video track has been received (confirms media negotiation complete)
+        2. Data channel is ready (confirms we can send messages)
+
+        This matches the JavaScript client's behavior where connect() returns
+        a MediaStream only after both video track and data channel are ready.
+        """
+        if self._has_called_on_connected:
+            return  # Already called for this connection
+
+        if not self._video_received or not self._data_channel_ready:
+            self._log(
+                f"Connection not yet ready: video_track={self._video_received}, data_channel={self._data_channel_ready}"
+            )
+            return
+
+        self._has_called_on_connected = True
+        self._log("Connection fully ready (video track + data channel)")
+
+        # Set status to CONNECTED now that we're fully ready
         self._set_status(ConnectionStatus.CONNECTED)
+
+        # Resolve the connect() future
+        if self._connect_future and not self._connect_future.done():
+            self._connect_future.set_result(None)
+
+        # Call user's on_connected handler
         if self._handlers.on_connected:
             self._handlers.on_connected()
 
@@ -408,6 +493,8 @@ class Odyssey:
         portrait: bool = True,
         image: Any | None = None,
         image_path: str | None = None,
+        bypass_prompt_expansion: bool | None = None,
+        broadcast: bool = False,
     ) -> str:
         """Start an interactive stream session.
 
@@ -420,6 +507,12 @@ class Odyssey:
                 - PIL.Image.Image: PIL Image object
                 - numpy.ndarray: RGB uint8 array (H, W, 3)
             image_path: Deprecated. Use `image` instead. Path to local image file.
+            bypass_prompt_expansion: Skip prompt expansion for this stream (safety-only mode).
+                Requires the expansion bypass privilege; the stream will fail to
+                start if set without it. None = use default behavior (expand).
+            broadcast: Enable broadcast mode for spectators. When True, the stream
+                will be available via HLS and WebRTC for spectator viewing. Use the
+                on_broadcast_ready callback to receive the playback URLs.
 
         Returns:
             Stream ID when the stream is ready. Use this for recordings.
@@ -460,7 +553,10 @@ class Odyssey:
             "prompt": prompt,
             "portrait": portrait,
             "input_image_base64": input_image_base64,
+            "broadcast": broadcast,
         }
+        if bypass_prompt_expansion is not None:
+            message["bypass_vlm_expansion"] = bypass_prompt_expansion
         message_size = len(json.dumps(message).encode("utf-8"))
         max_message_size = self._webrtc.max_message_size()
         if input_image_base64:
@@ -537,7 +633,7 @@ class Odyssey:
                 if image.width == target_width and image.height == target_height:
                     return image_bytes
 
-                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS  # type: ignore[attr-defined]
+                resample = Image.Resampling.LANCZOS
 
                 target_ratio = target_width / target_height
                 image_ratio = image.width / image.height
@@ -651,7 +747,6 @@ class Odyssey:
             self._auth = AuthClient(
                 api_key=self._config.api_key,
                 api_url=self._config.api_url,
-                queue_timeout_s=self._config.advanced.queue_timeout_s,
                 debug=self._config.dev.debug,
             )
         if not self._recordings:
@@ -756,7 +851,6 @@ class Odyssey:
             self._auth = AuthClient(
                 api_key=self._config.api_key,
                 api_url=self._config.api_url,
-                queue_timeout_s=self._config.advanced.queue_timeout_s,
                 debug=self._config.dev.debug,
             )
         if not self._simulations:
@@ -773,6 +867,7 @@ class Odyssey:
         scripts: list[list[dict[str, Any]]] | None = None,
         script_url: str | None = None,
         portrait: bool = True,
+        bypass_prompt_expansion: bool | None = None,
     ) -> SimulationJobDetail:
         """Submit a simulation job to be processed asynchronously.
 
@@ -800,6 +895,9 @@ class Odyssey:
             scripts: Batch mode - multiple scripts to run in parallel.
             script_url: URL to script JSON file (alternative to script/scripts).
             portrait: True for portrait (704x1280), False for landscape (1280x704).
+            bypass_prompt_expansion: Skip prompt expansion for this job (safety-only mode).
+                Requires the expansion bypass privilege; returns 403 if set without it.
+                None = use default behavior (expand).
 
         Returns:
             SimulationJobDetail with job info including job_id.
@@ -860,6 +958,7 @@ class Odyssey:
             scripts=processed_scripts,
             script_url=script_url,
             portrait=portrait,
+            bypass_prompt_expansion=bypass_prompt_expansion,
         )
 
         return SimulationJobDetail(
@@ -1153,6 +1252,11 @@ class Odyssey:
 
     async def _cleanup(self) -> None:
         """Clean up connections."""
+        # Reset connection readiness tracking
+        self._video_received = False
+        self._data_channel_ready = False
+        self._has_called_on_connected = False
+
         # Clear connect future
         if self._connect_future and not self._connect_future.done():
             self._connect_future.set_result(None)
@@ -1187,6 +1291,11 @@ class Odyssey:
             await self._simulations.close()
             self._simulations = None
 
+        # Close session client
+        if self._session:
+            await self._session.close()
+            self._session = None
+
         # Close auth client
         if self._auth:
             await self._auth.close()
@@ -1213,3 +1322,15 @@ class Odyssey:
     def current_session_id(self) -> str | None:
         """Get current session ID."""
         return self._session_id
+
+    @property
+    def last_applied_prompt(self) -> str | None:
+        """The rewritten prompt currently in use by the streamer.
+
+        Updated after start_stream() and interact() return. Returns None
+        if no stream has been started or the streamer did not include the
+        applied prompt.
+        """
+        if self._webrtc:
+            return self._webrtc.last_applied_prompt
+        return None
