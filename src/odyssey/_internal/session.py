@@ -170,9 +170,12 @@ class SessionClient:
 
             if response.status == 429:
                 data = await response.json()
-                raise_for_usage_error(response.status, data)
+                # FastAPI wraps HTTPException detail in {"detail": ...}
+                detail = data.get("detail", data)
+                raise_for_usage_error(response.status, detail)
                 # Fallback if response doesn't match usage error format
-                raise ValueError(data.get("detail", "Request limit exceeded"))
+                msg = detail if isinstance(detail, str) else "Request limit exceeded"
+                raise ValueError(msg)
 
             if not response.ok:
                 raise ConnectionError(f"API request failed: {response.status} {response.reason}")

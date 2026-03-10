@@ -86,6 +86,7 @@ __all__ = [
     "StreamDurationExceededError",
     "AccountSuspendedError",
     "RateLimitError",
+    "raise_for_usage_error",
     # Configuration
     "ClientConfig",
     "DevConfig",
