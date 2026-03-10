@@ -40,6 +40,7 @@ from .exceptions import (
     OdysseyUsageError,
     RateLimitError,
     StreamDurationExceededError,
+    raise_for_usage_error,
 )
 from .types import (
     BroadcastInfo,
@@ -115,7 +116,7 @@ __all__ = [
     "StatusChangeCallback",
 ]
 
-__version__ = "0.1.0"
+__version__ = "1.1.1"
 
 
 async def connect_to_stream(

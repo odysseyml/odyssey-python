@@ -8,6 +8,7 @@ from http import HTTPStatus
 
 import aiohttp
 
+from ..exceptions import raise_for_usage_error
 from .auth import AuthClient
 from .regions import measure_region_latencies
 
@@ -169,6 +170,8 @@ class SessionClient:
 
             if response.status == 429:
                 data = await response.json()
+                raise_for_usage_error(response.status, data)
+                # Fallback if response doesn't match usage error format
                 raise ValueError(data.get("detail", "Request limit exceeded"))
 
             if not response.ok:

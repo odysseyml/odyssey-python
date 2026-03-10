@@ -221,3 +221,45 @@ class RateLimitError(OdysseyUsageError):
             f"Please wait {retry_after} seconds",
             "You are sending requests too quickly",
         ]
+
+
+# =============================================================================
+# Error parsing helper
+# =============================================================================
+
+_ERROR_CODE_MAP: dict[str, type[OdysseyUsageError]] = {
+    "MONTHLY_LIMIT_REACHED": MonthlyLimitReachedError,
+    "CONCURRENT_LIMIT_REACHED": ConcurrentLimitReachedError,
+    "STREAM_DURATION_EXCEEDED": StreamDurationExceededError,
+    "ACCOUNT_SUSPENDED": AccountSuspendedError,
+    "RATE_LIMITED": RateLimitError,
+}
+
+
+def raise_for_usage_error(status: int, data: Any) -> None:
+    """Parse an HTTP response and raise the appropriate error if it's a usage error.
+
+    Supports both ``error`` (broker format) and ``code`` (legacy format) field names.
+
+    Args:
+        status: HTTP status code.
+        data: Response body (parsed JSON).
+
+    Raises:
+        OdysseyUsageError or subclass if status is 429 and data is a usage error.
+    """
+    if status != 429:
+        return
+    if not isinstance(data, dict) or "message" not in data or "action" not in data:
+        return
+
+    # Support both 'error' (broker) and 'code' (legacy) field names
+    error_code: str = data.get("error") or data.get("code") or "UNKNOWN"
+    error_cls = _ERROR_CODE_MAP.get(error_code, OdysseyUsageError)
+    raise error_cls(
+        code=error_code,
+        message=data["message"],
+        action=data["action"],
+        action_url=data.get("action_url"),
+        details=data.get("details"),
+    )
