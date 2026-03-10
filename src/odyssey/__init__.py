@@ -40,7 +40,6 @@ from .exceptions import (
     OdysseyUsageError,
     RateLimitError,
     StreamDurationExceededError,
-    raise_for_usage_error,
 )
 from .types import (
     BroadcastInfo,
@@ -86,7 +85,6 @@ __all__ = [
     "StreamDurationExceededError",
     "AccountSuspendedError",
     "RateLimitError",
-    "raise_for_usage_error",
     # Configuration
     "ClientConfig",
     "DevConfig",
