@@ -17,6 +17,9 @@ _BOX_WIDTH = 51  # Inner width of the error box
 def _format_error_box(title: str, lines: list[str], action_url: str | None = None) -> str:
     """Format an error message in a branded ASCII box.
 
+    Uses horizontal rules only (no side borders) for clean rendering
+    across all terminal widths and fonts.
+
     Args:
         title: The error title (e.g., "Monthly usage limit reached")
         lines: Detail lines to display
@@ -25,29 +28,31 @@ def _format_error_box(title: str, lines: list[str], action_url: str | None = Non
     Returns:
         Formatted multi-line string with ASCII box
     """
-    border = "━" * (_BOX_WIDTH + 2)
-    result = [f"┏{border}┓"]
+    rule = "━" * _BOX_WIDTH
+    result = [rule]
 
-    # Add logo lines
+    # Add logo
     for logo_line in _ODYSSEY_LOGO.split("\n"):
-        result.append(f"┃ {logo_line.ljust(_BOX_WIDTH)} ┃")
+        result.append(logo_line)
+    result.append("")
 
-    result.append(f"┣{border}┫")
-
-    # Add title with error marker
-    result.append(f"┃  ✗ {title.ljust(_BOX_WIDTH - 3)}┃")
-    result.append(f"┃{' ' * (_BOX_WIDTH + 2)}┃")
+    # Add title with error marker (wrap at sentence boundaries)
+    sentences = title.split(". ")
+    result.append(f"  ✗ {sentences[0]}{'.' if len(sentences) > 1 else ''}")
+    for sentence in sentences[1:]:
+        result.append(f"    {sentence}")
+    result.append("")
 
     # Add content lines
     for line in lines:
-        result.append(f"┃  {line.ljust(_BOX_WIDTH)}┃")
+        result.append(f"  {line}")
 
     # Add action URL
     if action_url:
-        result.append(f"┃{' ' * (_BOX_WIDTH + 2)}┃")
-        result.append(f"┃  → {action_url.ljust(_BOX_WIDTH - 2)}┃")
+        result.append("")
+        result.append(f"  → {action_url}")
 
-    result.append(f"┗{border}┛")
+    result.append(rule)
 
     return "\n".join(result)
 
@@ -221,3 +226,45 @@ class RateLimitError(OdysseyUsageError):
             f"Please wait {retry_after} seconds",
             "You are sending requests too quickly",
         ]
+
+
+# =============================================================================
+# Error parsing helper
+# =============================================================================
+
+_ERROR_CODE_MAP: dict[str, type[OdysseyUsageError]] = {
+    "MONTHLY_LIMIT_REACHED": MonthlyLimitReachedError,
+    "CONCURRENT_LIMIT_REACHED": ConcurrentLimitReachedError,
+    "STREAM_DURATION_EXCEEDED": StreamDurationExceededError,
+    "ACCOUNT_SUSPENDED": AccountSuspendedError,
+    "RATE_LIMITED": RateLimitError,
+}
+
+
+def raise_for_usage_error(status: int, data: Any) -> None:
+    """Parse an HTTP response and raise the appropriate error if it's a usage error.
+
+    Supports both ``error`` (broker format) and ``code`` (legacy format) field names.
+
+    Args:
+        status: HTTP status code.
+        data: Response body (parsed JSON).
+
+    Raises:
+        OdysseyUsageError or subclass if status is 429 and data is a usage error.
+    """
+    if status != 429:
+        return
+    if not isinstance(data, dict) or "message" not in data or "action" not in data:
+        return
+
+    # Support both 'error' (broker) and 'code' (legacy) field names
+    error_code: str = data.get("error") or data.get("code") or "UNKNOWN"
+    error_cls = _ERROR_CODE_MAP.get(error_code, OdysseyUsageError)
+    raise error_cls(
+        code=error_code,
+        message=data["message"],
+        action=data["action"],
+        action_url=data.get("action_url"),
+        details=data.get("details"),
+    )

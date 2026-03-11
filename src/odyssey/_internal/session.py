@@ -8,6 +8,7 @@ from http import HTTPStatus
 
 import aiohttp
 
+from ..exceptions import raise_for_usage_error
 from .auth import AuthClient
 from .regions import measure_region_latencies
 
@@ -169,7 +170,12 @@ class SessionClient:
 
             if response.status == 429:
                 data = await response.json()
-                raise ValueError(data.get("detail", "Request limit exceeded"))
+                # FastAPI wraps HTTPException detail in {"detail": ...}
+                detail = data.get("detail", data)
+                raise_for_usage_error(response.status, detail)
+                # Fallback if response doesn't match usage error format
+                msg = detail if isinstance(detail, str) else "Request limit exceeded"
+                raise ValueError(msg)
 
             if not response.ok:
                 raise ConnectionError(f"API request failed: {response.status} {response.reason}")
