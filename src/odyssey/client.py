@@ -11,7 +11,7 @@ from typing import Any
 from ._internal import AuthClient, RecordingsClient, SessionClient, SignalingClient, SimulationsClient, WebRTCConnection
 from ._internal.webrtc import WebRTCCallbacks
 from .config import ClientConfig
-from .exceptions import OdysseyAuthError, OdysseyConnectionError, OdysseyStreamError
+from .exceptions import OdysseyAuthError, OdysseyConnectionError, OdysseyStreamError, OdysseyUsageError
 from .types import (
     BroadcastReadyCallback,
     ConnectedCallback,
@@ -238,6 +238,12 @@ class Odyssey:
 
                 self._log(f"Using API-assigned session {self._session_id} at {self._current_signaling_url}")
 
+            except OdysseyUsageError as e:
+                # Usage errors (429) should propagate with their typed class intact
+                self._set_status(ConnectionStatus.FAILED, str(e), error=e)
+                if self._handlers.on_error:
+                    self._handlers.on_error(e, True)
+                raise
             except Exception as e:
                 error_msg = str(e)
                 # Determine if this is an auth error or connection error

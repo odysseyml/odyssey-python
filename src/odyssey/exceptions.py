@@ -17,6 +17,9 @@ _BOX_WIDTH = 51  # Inner width of the error box
 def _format_error_box(title: str, lines: list[str], action_url: str | None = None) -> str:
     """Format an error message in a branded ASCII box.
 
+    Uses horizontal rules only (no side borders) for clean rendering
+    across all terminal widths and fonts.
+
     Args:
         title: The error title (e.g., "Monthly usage limit reached")
         lines: Detail lines to display
@@ -25,29 +28,31 @@ def _format_error_box(title: str, lines: list[str], action_url: str | None = Non
     Returns:
         Formatted multi-line string with ASCII box
     """
-    border = "━" * (_BOX_WIDTH + 2)
-    result = [f"┏{border}┓"]
+    rule = "━" * _BOX_WIDTH
+    result = [rule]
 
-    # Add logo lines
+    # Add logo
     for logo_line in _ODYSSEY_LOGO.split("\n"):
-        result.append(f"┃ {logo_line.ljust(_BOX_WIDTH)} ┃")
+        result.append(logo_line)
+    result.append("")
 
-    result.append(f"┣{border}┫")
-
-    # Add title with error marker
-    result.append(f"┃  ✗ {title.ljust(_BOX_WIDTH - 3)}┃")
-    result.append(f"┃{' ' * (_BOX_WIDTH + 2)}┃")
+    # Add title with error marker (wrap at sentence boundaries)
+    sentences = title.split(". ")
+    result.append(f"  ✗ {sentences[0]}{'.' if len(sentences) > 1 else ''}")
+    for sentence in sentences[1:]:
+        result.append(f"    {sentence}")
+    result.append("")
 
     # Add content lines
     for line in lines:
-        result.append(f"┃  {line.ljust(_BOX_WIDTH)}┃")
+        result.append(f"  {line}")
 
     # Add action URL
     if action_url:
-        result.append(f"┃{' ' * (_BOX_WIDTH + 2)}┃")
-        result.append(f"┃  → {action_url.ljust(_BOX_WIDTH - 2)}┃")
+        result.append("")
+        result.append(f"  → {action_url}")
 
-    result.append(f"┗{border}┛")
+    result.append(rule)
 
     return "\n".join(result)
 
