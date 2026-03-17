@@ -82,26 +82,20 @@ class SignalingClient:
         self,
         signaling_url: str,
         session_id: str,
-        session_token: str | None = None,
+        session_token: str,
     ) -> None:
         """Connect to the signaling server.
 
         Args:
             signaling_url: WebSocket URL of the signaling server.
             session_id: Session ID to connect to.
-            session_token: Optional session token for authentication.
+            session_token: Session token for authentication (always required).
 
         Raises:
             ConnectionError: If connection fails.
         """
         normalized_url = self._normalize_url(signaling_url)
-        url = f"{normalized_url}/client/{session_id}"
-
-        # Add session token as query parameter if provided
-        if session_token:
-            url += f"?{urlencode({'token': session_token})}"
-
-        self._log(f"Connecting to {url}")
+        url = f"{normalized_url}/client/{session_id}?{urlencode({'token': session_token})}"
 
         try:
             self._ws = await websockets.connect(url, max_size=MAX_SIGNALING_MESSAGE_SIZE)
