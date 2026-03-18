@@ -126,7 +126,7 @@ class Odyssey:
 
     def _log(self, msg: str) -> None:
         """Log a debug message."""
-        if self._config.dev.debug:
+        if self._config.debug:
             logger.debug(f"[Client] {msg}")
 
     def _error(self, msg: str) -> None:
@@ -208,54 +208,48 @@ class Odyssey:
 
         self._retry_count = 0
 
-        # Check if using direct signaling (development mode)
-        if self._config.dev.signaling_url:
-            self._current_signaling_url = self._config.dev.signaling_url
-            self._session_id = self._config.dev.session_id
-            self._log(f"Using direct signaling URL {self._current_signaling_url} (bypassing API)")
-        else:
-            # Request session from API
-            self._set_status(ConnectionStatus.AUTHENTICATING, "Connecting to Odyssey...")
+        # Request session from API
+        self._set_status(ConnectionStatus.AUTHENTICATING, "Connecting to Odyssey...")
 
-            try:
-                self._log("Authenticating with API key...")
-                self._auth = AuthClient(
-                    api_key=self._config.api_key,
-                    api_url=self._config.api_url,
-                    debug=self._config.dev.debug,
-                )
-                self._session = SessionClient(
-                    auth=self._auth,
-                    api_url=self._config.api_url,
-                    queue_timeout_s=self._config.advanced.queue_timeout_s,
-                    debug=self._config.dev.debug,
-                )
+        try:
+            self._log("Authenticating with API key...")
+            self._auth = AuthClient(
+                api_key=self._config.api_key,
+                api_url=self._config.api_url,
+                debug=self._config.debug,
+            )
+            self._session = SessionClient(
+                auth=self._auth,
+                api_url=self._config.api_url,
+                queue_timeout_s=self._config.advanced.queue_timeout_s,
+                debug=self._config.debug,
+            )
 
-                session_info = await self._session.request_session()
+            session_info = await self._session.request_session()
 
-                self._session_id = session_info.session_id
-                self._current_signaling_url = session_info.signaling_url
+            self._session_id = session_info.session_id
+            self._current_signaling_url = session_info.signaling_url
 
-                self._log(f"Using API-assigned session {self._session_id} at {self._current_signaling_url}")
+            self._log(f"Using API-assigned session {self._session_id} at {self._current_signaling_url}")
 
-            except OdysseyUsageError as e:
-                # Usage errors (429) should propagate with their typed class intact
-                self._set_status(ConnectionStatus.FAILED, str(e), error=e)
-                if self._handlers.on_error:
-                    self._handlers.on_error(e, True)
-                raise
-            except Exception as e:
-                error_msg = str(e)
-                # Determine if this is an auth error or connection error
-                err: OdysseyAuthError | OdysseyConnectionError
-                if "401" in error_msg or "403" in error_msg or "invalid" in error_msg.lower():
-                    err = OdysseyAuthError(error_msg)
-                else:
-                    err = OdysseyConnectionError(error_msg)
-                self._set_status(ConnectionStatus.FAILED, error_msg, error=err)
-                if self._handlers.on_error:
-                    self._handlers.on_error(err, True)
-                raise err from e
+        except OdysseyUsageError as e:
+            # Usage errors (429) should propagate with their typed class intact
+            self._set_status(ConnectionStatus.FAILED, str(e), error=e)
+            if self._handlers.on_error:
+                self._handlers.on_error(e, True)
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            # Determine if this is an auth error or connection error
+            err: OdysseyAuthError | OdysseyConnectionError
+            if "401" in error_msg or "403" in error_msg or "invalid" in error_msg.lower():
+                err = OdysseyAuthError(error_msg)
+            else:
+                err = OdysseyConnectionError(error_msg)
+            self._set_status(ConnectionStatus.FAILED, error_msg, error=err)
+            if self._handlers.on_error:
+                self._handlers.on_error(err, True)
+            raise err from e
 
         # Set connecting status
         self._set_status(ConnectionStatus.CONNECTING, "Connecting to signaling server...")
@@ -312,7 +306,7 @@ class Odyssey:
 
         try:
             # Create WebRTC connection
-            self._webrtc = WebRTCConnection(debug=self._config.dev.debug)
+            self._webrtc = WebRTCConnection(debug=self._config.debug)
             self._webrtc.set_callbacks(
                 WebRTCCallbacks(
                     on_connected=self._on_webrtc_connected,
@@ -333,7 +327,7 @@ class Odyssey:
 
             # Create signaling client
             self._signaling = SignalingClient(
-                debug=self._config.dev.debug,
+                debug=self._config.debug,
                 on_close=self._handle_signaling_close,
             )
 
@@ -342,15 +336,16 @@ class Odyssey:
             self._signaling.on("ice_candidate", self._handle_ice_candidate)
             self._signaling.on("error", self._handle_signaling_error)
 
-            # Get session token if we have session client
-            session_token = None
-            if self._session and self._session_id:
-                session_token = await self._session.fetch_session_token(self._session_id)
+            # Get session token (always required)
+            # These are always set by connect() before _attempt_connection is called
+            assert self._session is not None
+            assert self._session_id is not None
+            session_token = await self._session.fetch_session_token(self._session_id)
 
             # Connect to signaling server
             await self._signaling.connect(
                 self._current_signaling_url,
-                self._session_id or "",
+                self._session_id,
                 session_token,
             )
 
@@ -753,13 +748,13 @@ class Odyssey:
             self._auth = AuthClient(
                 api_key=self._config.api_key,
                 api_url=self._config.api_url,
-                debug=self._config.dev.debug,
+                debug=self._config.debug,
             )
         if not self._recordings:
             self._recordings = RecordingsClient(
                 auth=self._auth,
                 api_url=self._config.api_url,
-                debug=self._config.dev.debug,
+                debug=self._config.debug,
             )
 
     async def get_recording(self, stream_id: str) -> Recording:
@@ -857,13 +852,13 @@ class Odyssey:
             self._auth = AuthClient(
                 api_key=self._config.api_key,
                 api_url=self._config.api_url,
-                debug=self._config.dev.debug,
+                debug=self._config.debug,
             )
         if not self._simulations:
             self._simulations = SimulationsClient(
                 auth=self._auth,
                 api_url=self._config.api_url,
-                debug=self._config.dev.debug,
+                debug=self._config.debug,
             )
 
     async def simulate(

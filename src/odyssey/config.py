@@ -18,23 +18,6 @@ def _get_default_api_url() -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class DevConfig:
-    """Development/debug settings for the client.
-
-    These settings should not be exposed in production interfaces.
-    """
-
-    signaling_url: str | None = None
-    """WebSocket signaling server URL - when provided, bypasses API for direct connection."""
-
-    session_id: str | None = None
-    """Session ID to use with signaling_url (required when signaling_url is set)."""
-
-    debug: bool = False
-    """Enable debug logging."""
-
-
-@dataclass(frozen=True, slots=True)
 class AdvancedConfig:
     """Advanced connection settings."""
 
@@ -71,8 +54,8 @@ class ClientConfig:
     api_url: str = field(default_factory=_get_default_api_url)
     """API URL (defaults to https://api.odyssey.ml or ODYSSEY_API_URL env var)."""
 
-    dev: DevConfig = field(default_factory=DevConfig)
-    """Development/debug settings."""
+    debug: bool = False
+    """Enable debug logging."""
 
     advanced: AdvancedConfig = field(default_factory=AdvancedConfig)
     """Advanced connection settings."""
@@ -85,7 +68,3 @@ class ClientConfig:
             raise TypeError("api_key must be a string")
         if self.api_key.strip() == "":
             raise ValueError("api_key cannot be empty")
-
-        # Validate dev config
-        if self.dev.signaling_url and not self.dev.session_id:
-            raise ValueError("dev.session_id is required when dev.signaling_url is set")

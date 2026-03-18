@@ -5,7 +5,6 @@ from typing import Any
 
 import aiohttp
 
-from ..exceptions import raise_for_usage_error
 from .auth import AuthClient
 
 logger = logging.getLogger(__name__)
@@ -98,12 +97,6 @@ class SimulationsClient:
         url = f"{self._api_url}/simulation-jobs"
 
         async with session.post(url, headers=headers, json=body) as response:
-            if response.status == 429:
-                data = await response.json()
-                detail = data.get("detail", data)
-                raise_for_usage_error(response.status, detail)
-                msg = detail if isinstance(detail, str) else "Request limit exceeded"
-                raise ValueError(msg)
             if not response.ok:
                 error_text = await response.text()
                 raise ConnectionError(f"Failed to submit simulation: {response.status} {error_text}")

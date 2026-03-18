@@ -28,7 +28,7 @@ Example:
 """
 
 from .client import Odyssey, OdysseyEventHandlers
-from .config import AdvancedConfig, ClientConfig, DevConfig
+from .config import AdvancedConfig, ClientConfig
 from .exceptions import (
     AccountSuspendedError,
     ConcurrentLimitReachedError,
@@ -87,7 +87,6 @@ __all__ = [
     "RateLimitError",
     # Configuration
     "ClientConfig",
-    "DevConfig",
     "AdvancedConfig",
     # Types
     "VideoFrame",
@@ -115,7 +114,7 @@ __all__ = [
     "StatusChangeCallback",
 ]
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 
 async def connect_to_stream(
