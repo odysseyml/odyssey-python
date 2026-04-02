@@ -16,12 +16,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class SessionTokenInfo:
+    """Token and its lifetime returned by /sessions/token."""
+
+    token: str
+    expires_in: int
+
+
+@dataclass
 class SessionInfo:
     """Information about a streaming session."""
 
     session_id: str
     signaling_url: str
     session_token: str
+    session_token_expires_in: int
 
 
 class SessionClient:
@@ -69,14 +78,14 @@ class SessionClient:
             self._http_session = aiohttp.ClientSession()
         return self._http_session
 
-    async def fetch_session_token(self, session_id: str) -> str:
+    async def fetch_session_token(self, session_id: str) -> SessionTokenInfo:
         """Fetch session token for WebSocket authentication.
 
         Args:
             session_id: The session ID to get a token for.
 
         Returns:
-            Session token string.
+            SessionTokenInfo with the token string and its lifetime.
         """
         auth_token = self._auth.auth_token
         if not auth_token:
@@ -105,8 +114,9 @@ class SessionClient:
         if "session_token" not in data:
             raise ValueError("Invalid session token response")
 
-        self._log(f"Session token obtained, expires in {data.get('expires_in', 300)}s")
-        return str(data["session_token"])
+        expires_in = int(data.get("expires_in", 600))
+        self._log(f"Session token obtained, expires in {expires_in}s")
+        return SessionTokenInfo(token=str(data["session_token"]), expires_in=expires_in)
 
     async def _fetch_region_latencies(self) -> dict[str, int]:
         async with self._region_latency_lock:
@@ -208,11 +218,12 @@ class SessionClient:
 
         result = await self._request_session_once(region_latencies_task)
         if result:
-            session_token = await self.fetch_session_token(result["session_id"])
+            token_info = await self.fetch_session_token(result["session_id"])
             return SessionInfo(
                 session_id=result["session_id"],
                 signaling_url=result["signaling_url"],
-                session_token=session_token,
+                session_token=token_info.token,
+                session_token_expires_in=token_info.expires_in,
             )
 
         # No streamers available - start polling if timeout > 0
@@ -226,11 +237,12 @@ class SessionClient:
 
             result = await self._request_session_once(region_latencies_task)
             if result:
-                session_token = await self.fetch_session_token(result["session_id"])
+                token_info = await self.fetch_session_token(result["session_id"])
                 return SessionInfo(
                     session_id=result["session_id"],
                     signaling_url=result["signaling_url"],
-                    session_token=session_token,
+                    session_token=token_info.token,
+                    session_token_expires_in=token_info.expires_in,
                 )
 
             elapsed = int(time.time() - start_time)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -12,6 +14,40 @@ from numpy.typing import NDArray
 
 if TYPE_CHECKING:
     from ._internal.whep import WhepConnection
+
+
+def _extract_session_id(token: str) -> str:
+    """Extract session_id from a JWT session token without signature verification.
+
+    The token is a standard JWT (header.payload.signature). The payload is
+    base64url-encoded JSON containing a ``session_id`` claim.
+
+    Signature verification is intentionally skipped because the JWT is signed
+    with an HS256 secret that only the server possesses. The client reads the
+    ``session_id`` for routing only — the signaling server verifies the full
+    signature when the token is presented during WebSocket connection.
+
+    Raises:
+        ValueError: If the token is malformed or missing the session_id claim.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError("session_token is not a valid JWT (expected 3 dot-separated parts)")
+    payload_b64 = parts[1]
+    # JWT uses base64url encoding — add padding as needed
+    padding = 4 - len(payload_b64) % 4
+    if padding != 4:
+        payload_b64 += "=" * padding
+    try:
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        payload = json.loads(payload_bytes)
+    except Exception as e:
+        raise ValueError(f"Failed to decode session_token JWT payload: {e}") from e
+    session_id = payload.get("session_id")
+    if not session_id or not isinstance(session_id, str):
+        raise ValueError("session_token JWT does not contain a valid 'session_id' claim")
+    result: str = session_id
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +159,100 @@ class StreamRecordingsList:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClientCredentials:
+    """Pre-minted credentials for client-side connections.
+
+    Created server-side via ``Odyssey.create_client_credentials()`` and passed
+    to the client (e.g., browser) for direct connection without an API key.
+
+    The ``session_id`` is automatically extracted from the JWT session token,
+    so callers only need to provide ``signaling_url``, ``session_token``, and
+    ``expires_in``.
+
+    Attributes:
+        signaling_url: WebSocket URL for the signaling server.
+        session_token: Short-lived JWT for session authentication.
+            Must contain a ``session_id`` claim in its payload.
+        expires_in: Token lifetime in seconds.
+        session_id: Derived from the JWT — do not provide manually.
+
+    Example:
+        Server-side (has API key)::
+
+            server = Odyssey(api_key="ody_...")
+            credentials = await server.create_client_credentials()
+            # Send credentials.to_dict() to the client application
+
+        Client-side (no API key)::
+
+            credentials = ClientCredentials.from_dict(data_from_server)
+            client = Odyssey()
+            await client.connect_with_credentials(
+                credentials=credentials,
+                on_video_frame=handle_frame,
+            )
+    """
+
+    signaling_url: str
+    session_token: str
+    expires_in: int
+    session_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Validate inputs and extract session_id from the JWT."""
+        if not isinstance(self.session_token, str) or not self.session_token.strip():
+            raise ValueError("session_token must be a non-empty string")
+        if not isinstance(self.signaling_url, str) or not self.signaling_url.strip():
+            raise ValueError("signaling_url must be a non-empty string")
+        object.__setattr__(self, "session_id", _extract_session_id(self.session_token))
+
+    def __repr__(self) -> str:
+        """Redact session_token to prevent accidental credential leakage in logs."""
+        token_preview = self.session_token[:8] + "..." if len(self.session_token) > 8 else "***"
+        return (
+            f"ClientCredentials(session_id={self.session_id!r}, "
+            f"signaling_url={self.signaling_url!r}, "
+            f"session_token={token_preview!r}, "
+            f"expires_in={self.expires_in})"
+        )
+
+    def to_dict(self) -> dict[str, str | int]:
+        """Serialize to a plain dict for transport (e.g., JSON API response).
+
+        Includes ``session_id`` for convenience (e.g., so JavaScript clients
+        don't need to decode the JWT). The full ``session_token`` is included —
+        only call this when you intend to transmit credentials to the client.
+        """
+        return {
+            "session_id": self.session_id,
+            "signaling_url": self.signaling_url,
+            "session_token": self.session_token,
+            "expires_in": self.expires_in,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, str | int]) -> ClientCredentials:
+        """Deserialize from a plain dict (e.g., received from server API).
+
+        The ``session_id`` in the dict is ignored — it is re-derived from
+        the JWT to ensure consistency.
+
+        Args:
+            data: Dict with signaling_url, session_token, expires_in
+                (session_id is optional and ignored).
+
+        Raises:
+            KeyError: If a required field is missing.
+            ValueError: If the session_token is not a valid JWT.
+        """
+        return cls(
+            signaling_url=str(data["signaling_url"]),
+            session_token=str(data["session_token"]),
+            expires_in=int(data["expires_in"]),
+        )
 
 
 class ConnectionStatus(str, Enum):

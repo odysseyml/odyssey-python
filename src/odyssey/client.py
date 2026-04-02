@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from ._internal import AuthClient, RecordingsClient, SessionClient, SignalingClient, SimulationsClient, WebRTCConnection
+from ._internal.telemetry import ClientErrorType, TelemetryReporter
 from ._internal.webrtc import WebRTCCallbacks
 from .config import ClientConfig
 from .exceptions import OdysseyAuthError, OdysseyConnectionError, OdysseyStreamError, OdysseyUsageError
 from .types import (
     BroadcastReadyCallback,
+    ClientCredentials,
     ConnectedCallback,
     ConnectionStatus,
     DisconnectedCallback,
@@ -83,16 +85,21 @@ class Odyssey:
         ```
     """
 
-    def __init__(self, api_key: str, **kwargs: Any) -> None:
+    def __init__(self, api_key: str = "", **kwargs: Any) -> None:
         """Create a new Odyssey client.
 
         Args:
-            api_key: API key for authentication (required).
+            api_key: API key for authentication. Required for ``connect()`` and
+                API-key-gated methods (recordings, simulations). May be omitted
+                when using ``connect_with_credentials()``.
             **kwargs: Additional configuration options passed to ClientConfig.
+                Also accepts ``enable_telemetry`` (bool, default True) to
+                control client-side error reporting.
 
         Raises:
-            ValueError: If api_key is empty or invalid.
+            TypeError: If api_key is not a string.
         """
+        enable_telemetry = kwargs.pop("enable_telemetry", True)
         self._config = ClientConfig(api_key=api_key, **kwargs)
         self._handlers = OdysseyEventHandlers()
 
@@ -108,6 +115,17 @@ class Odyssey:
         self._webrtc: WebRTCConnection | None = None
         self._recordings: RecordingsClient | None = None
         self._simulations: SimulationsClient | None = None
+
+        # Telemetry (enabled by default, disable with enable_telemetry=False)
+        self._telemetry: TelemetryReporter | None = None
+        if enable_telemetry:
+            from . import __version__
+
+            self._telemetry = TelemetryReporter(
+                api_url=self._config.api_url,
+                sdk_version=__version__,
+                debug=self._config.debug,
+            )
 
         # Retry state
         self._retry_count = 0
@@ -133,11 +151,35 @@ class Odyssey:
         """Log an error message."""
         logger.error(f"[Client] {msg}")
 
+    def _report_error(self, error: Exception) -> None:
+        """Report an error via telemetry if enabled."""
+        if not self._telemetry:
+            return
+        error_type = ClientErrorType.UNKNOWN
+        error_code = None
+        if isinstance(error, OdysseyAuthError):
+            error_type = ClientErrorType.AUTH
+        elif isinstance(error, OdysseyConnectionError):
+            error_type = ClientErrorType.CONNECTION
+        elif isinstance(error, OdysseyStreamError):
+            error_type = ClientErrorType.STREAM
+        elif isinstance(error, OdysseyUsageError):
+            error_type = ClientErrorType.USAGE
+            error_code = error.code
+        self._telemetry.report_error(
+            error_type=error_type,
+            error_message=str(error.args[0]) if error.args else str(error),
+            error_code=error_code,
+            connection_status=self._status.value,
+        )
+
     def _set_status(self, status: ConnectionStatus, message: str | None = None, error: Exception | None = None) -> None:
         """Set connection status and notify handlers."""
         self._status = status
         if error:
             self._connect_error = error
+            if status == ConnectionStatus.FAILED:
+                self._report_error(error)
         if self._handlers.on_status_change:
             self._handlers.on_status_change(status, message)
 
@@ -212,9 +254,13 @@ class Odyssey:
         self._set_status(ConnectionStatus.AUTHENTICATING, "Connecting to Odyssey...")
 
         try:
+            api_key = self._config.require_api_key()
+            if self._telemetry:
+                self._telemetry.set_api_key_prefix(api_key)
+                self._telemetry.report_connecting()
             self._log("Authenticating with API key...")
             self._auth = AuthClient(
-                api_key=self._config.api_key,
+                api_key=api_key,
                 api_url=self._config.api_url,
                 debug=self._config.debug,
             )
@@ -229,6 +275,8 @@ class Odyssey:
 
             self._session_id = session_info.session_id
             self._current_signaling_url = session_info.signaling_url
+            if self._telemetry:
+                self._telemetry.set_session_id(self._session_id)
 
             self._log(f"Using API-assigned session {self._session_id} at {self._current_signaling_url}")
 
@@ -255,7 +303,7 @@ class Odyssey:
         self._set_status(ConnectionStatus.CONNECTING, "Connecting to signaling server...")
 
         # Create connect future
-        self._connect_future = asyncio.get_event_loop().create_future()
+        self._connect_future = asyncio.get_running_loop().create_future()
 
         # Attempt connection
         await self._attempt_connection()
@@ -290,8 +338,167 @@ class Odyssey:
                     self._handlers.on_error(dc_err, True)
                 raise dc_err from timeout_err
 
-    async def _attempt_connection(self) -> None:
-        """Attempt to establish connection."""
+    async def create_client_credentials(self) -> ClientCredentials:
+        """Provision a session and return credentials for client-side connection.
+
+        This enables a two-phase authentication flow where a trusted server
+        mints short-lived credentials that are passed to an untrusted client
+        (e.g., a browser) for direct connection without exposing the API key.
+
+        1. **Server-side**: call this method with a valid API key.
+        2. **Client-side**: pass the returned credentials to
+           ``connect_with_credentials()``.
+
+        Returns:
+            ClientCredentials containing session_id, signaling_url,
+            session_token, and expires_in (seconds).
+
+        Raises:
+            OdysseyAuthError: If the API key is invalid.
+            OdysseyConnectionError: If session provisioning fails.
+            OdysseyUsageError: If a usage limit is exceeded.
+        """
+        api_key = self._config.require_api_key()
+
+        auth = AuthClient(
+            api_key=api_key,
+            api_url=self._config.api_url,
+            debug=self._config.debug,
+        )
+        try:
+            session_client = SessionClient(
+                auth=auth,
+                api_url=self._config.api_url,
+                queue_timeout_s=self._config.advanced.queue_timeout_s,
+                debug=self._config.debug,
+            )
+            try:
+                session_info = await session_client.request_session()
+
+                return ClientCredentials(
+                    signaling_url=session_info.signaling_url,
+                    session_token=session_info.session_token,
+                    expires_in=session_info.session_token_expires_in,
+                )
+            except OdysseyUsageError:
+                raise
+            except Exception as e:
+                error_msg = str(e)
+                if "401" in error_msg or "403" in error_msg or "invalid" in error_msg.lower():
+                    raise OdysseyAuthError(error_msg) from e
+                raise OdysseyConnectionError(error_msg) from e
+            finally:
+                await session_client.close()
+        finally:
+            await auth.close()
+
+    async def connect_with_credentials(
+        self,
+        credentials: ClientCredentials,
+        on_connected: ConnectedCallback | None = None,
+        on_disconnected: DisconnectedCallback | None = None,
+        on_video_frame: VideoFrameCallback | None = None,
+        on_stream_started: StreamStartedCallback | None = None,
+        on_stream_ended: StreamEndedCallback | None = None,
+        on_interact_acknowledged: InteractAcknowledgedCallback | None = None,
+        on_broadcast_ready: BroadcastReadyCallback | None = None,
+        on_stream_error: StreamErrorCallback | None = None,
+        on_error: ErrorCallback | None = None,
+        on_status_change: StatusChangeCallback | None = None,
+    ) -> None:
+        """Connect using pre-minted credentials (no API key needed).
+
+        Use this with credentials obtained from ``create_client_credentials()``
+        to establish a connection without exposing the API key to the client.
+
+        Args:
+            credentials: Pre-minted credentials from ``create_client_credentials()``.
+            on_connected: Called when WebRTC connection is established.
+            on_disconnected: Called when connection is closed.
+            on_video_frame: Called for each video frame received.
+            on_stream_started: Called when the interactive stream starts.
+            on_stream_ended: Called when the interactive stream ends.
+            on_interact_acknowledged: Called when an interaction is acknowledged.
+            on_broadcast_ready: Called when broadcast URLs are available.
+            on_stream_error: Called when a stream error occurs.
+            on_error: Called on transient errors during streaming.
+            on_status_change: Called when connection status changes.
+
+        Raises:
+            OdysseyConnectionError: If connection fails.
+        """
+        if self._status in (
+            ConnectionStatus.AUTHENTICATING,
+            ConnectionStatus.CONNECTING,
+            ConnectionStatus.RECONNECTING,
+            ConnectionStatus.CONNECTED,
+        ):
+            self._log(f"connect_with_credentials() called while already {self._status.value}, ignoring")
+            if self._status == ConnectionStatus.CONNECTED:
+                return
+            raise OdysseyConnectionError(f"Already {self._status.value}")
+
+        self._connect_error = None
+
+        self._handlers = OdysseyEventHandlers(
+            on_connected=on_connected,
+            on_disconnected=on_disconnected,
+            on_video_frame=on_video_frame,
+            on_stream_started=on_stream_started,
+            on_stream_ended=on_stream_ended,
+            on_interact_acknowledged=on_interact_acknowledged,
+            on_broadcast_ready=on_broadcast_ready,
+            on_stream_error=on_stream_error,
+            on_error=on_error,
+            on_status_change=on_status_change,
+        )
+
+        self._retry_count = 0
+        self._session_id = credentials.session_id
+        self._current_signaling_url = credentials.signaling_url
+        if self._telemetry:
+            self._telemetry.set_session_id(self._session_id)
+            self._telemetry.report_connecting()
+
+        self._set_status(ConnectionStatus.CONNECTING, "Connecting with pre-minted credentials...")
+
+        self._connect_future = asyncio.get_running_loop().create_future()
+
+        await self._attempt_connection(session_token=credentials.session_token)
+
+        try:
+            await asyncio.wait_for(self._connect_future, timeout=30.0)
+        except TimeoutError:
+            pending = []
+            if not self._video_received:
+                pending.append("video_track")
+            if not self._data_channel_ready:
+                pending.append("data_channel")
+            error_msg = f"Connection timed out waiting for: {', '.join(pending)}"
+            self._error(error_msg)
+            raise OdysseyConnectionError(error_msg) from None
+
+        if self._status == ConnectionStatus.FAILED:
+            error = self._connect_error or OdysseyConnectionError("Connection failed")
+            raise error
+
+        if self._webrtc:
+            try:
+                await self._webrtc.wait_for_data_channel_open(timeout=30.0)
+            except TimeoutError as timeout_err:
+                dc_err = OdysseyConnectionError("Timeout waiting for data channel to open")
+                self._set_status(ConnectionStatus.FAILED, str(dc_err), error=dc_err)
+                if self._handlers.on_error:
+                    self._handlers.on_error(dc_err, True)
+                raise dc_err from timeout_err
+
+    async def _attempt_connection(self, session_token: str | None = None) -> None:
+        """Attempt to establish connection.
+
+        Args:
+            session_token: Pre-minted session token. When provided, skips the
+                ``fetch_session_token`` call (used by ``connect_with_credentials``).
+        """
         self._log("=== ENTERED _attempt_connection() ===")
 
         if not self._current_signaling_url:
@@ -336,13 +543,16 @@ class Odyssey:
             self._signaling.on("ice_candidate", self._handle_ice_candidate)
             self._signaling.on("error", self._handle_signaling_error)
 
-            # Get session token (always required)
-            # These are always set by connect() before _attempt_connection is called
-            assert self._session is not None
-            assert self._session_id is not None
-            session_token = await self._session.fetch_session_token(self._session_id)
+            # Get session token (always required for signaling auth)
+            if session_token is None:
+                # Standard flow: fetch from API using auth token
+                assert self._session is not None
+                assert self._session_id is not None
+                token_info = await self._session.fetch_session_token(self._session_id)
+                session_token = token_info.token
 
             # Connect to signaling server
+            assert self._session_id is not None
             await self._signaling.connect(
                 self._current_signaling_url,
                 self._session_id,
@@ -367,7 +577,7 @@ class Odyssey:
                 self._log(f"Retrying in {delay_ms}ms (attempt {self._retry_count}/{self._config.advanced.max_retries})")
 
                 await asyncio.sleep(delay_ms / 1000)
-                await self._attempt_connection()
+                await self._attempt_connection(session_token=session_token)
             else:
                 self._error(f"Connection failed after {self._config.advanced.max_retries} retries")
                 err = OdysseyConnectionError(str(e))
@@ -421,6 +631,10 @@ class Odyssey:
 
         # Set status to CONNECTED now that we're fully ready
         self._set_status(ConnectionStatus.CONNECTED)
+
+        # Report successful connection with timing
+        if self._telemetry:
+            self._telemetry.report_connected()
 
         # Resolve the connect() future
         if self._connect_future and not self._connect_future.done():
@@ -746,7 +960,7 @@ class Odyssey:
         """Ensure recordings client is initialized."""
         if not self._auth:
             self._auth = AuthClient(
-                api_key=self._config.api_key,
+                api_key=self._config.require_api_key(),
                 api_url=self._config.api_url,
                 debug=self._config.debug,
             )
@@ -850,7 +1064,7 @@ class Odyssey:
         """Ensure simulations client is initialized."""
         if not self._auth:
             self._auth = AuthClient(
-                api_key=self._config.api_key,
+                api_key=self._config.require_api_key(),
                 api_url=self._config.api_url,
                 debug=self._config.debug,
             )
@@ -1301,6 +1515,11 @@ class Odyssey:
         if self._auth:
             await self._auth.close()
             self._auth = None
+
+        # Report disconnection and close telemetry reporter
+        if self._telemetry:
+            self._telemetry.report_disconnected()
+            await self._telemetry.close()
 
         # Reset state
         self._current_signaling_url = None

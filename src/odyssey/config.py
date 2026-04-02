@@ -42,14 +42,16 @@ class ClientConfig:
     """Configuration for the Odyssey client.
 
     Attributes:
-        api_key: API key for authentication (required).
+        api_key: API key for authentication. Required for ``connect()`` and
+            API-key-gated methods. May be omitted when using
+            ``connect_with_credentials()`` with pre-minted session tokens.
         api_url: API URL (defaults to production).
-        dev: Development/debug settings.
+        debug: Enable debug logging.
         advanced: Advanced connection settings.
     """
 
-    api_key: str
-    """API key for authentication (required)."""
+    api_key: str = ""
+    """API key for authentication. Empty is allowed for credential-based connections."""
 
     api_url: str = field(default_factory=_get_default_api_url)
     """API URL (defaults to https://api.odyssey.ml or ODYSSEY_API_URL env var)."""
@@ -62,9 +64,19 @@ class ClientConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration."""
-        if not self.api_key:
-            raise ValueError("api_key is required")
         if not isinstance(self.api_key, str):
             raise TypeError("api_key must be a string")
-        if self.api_key.strip() == "":
-            raise ValueError("api_key cannot be empty")
+
+    def require_api_key(self) -> str:
+        """Return the API key, raising if it is empty or blank.
+
+        Raises:
+            ValueError: If ``api_key`` was not provided.
+        """
+        if not self.api_key or self.api_key.strip() == "":
+            raise ValueError(
+                "api_key is required for this operation. "
+                "Pass an API key to the Odyssey constructor, or use "
+                "connect_with_credentials() for pre-minted session tokens."
+            )
+        return self.api_key

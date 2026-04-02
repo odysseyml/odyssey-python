@@ -25,6 +25,24 @@ Example:
     finally:
         await client.disconnect()
     ```
+
+Two-phase auth (server mints credentials, client connects directly)::
+
+    ```python
+    # Server-side (trusted, has API key)
+    server = Odyssey(api_key="ody_...")
+    credentials = await server.create_client_credentials()
+    # Send credentials.to_dict() to the client (e.g., via your API)
+
+    # Client-side (no API key needed)
+    credentials = ClientCredentials.from_dict(data_from_server)
+    client = Odyssey()
+    await client.connect_with_credentials(
+        credentials=credentials,
+        on_video_frame=on_frame,
+    )
+    await client.start_stream("A cat")
+    ```
 """
 
 from .client import Odyssey, OdysseyEventHandlers
@@ -44,6 +62,7 @@ from .exceptions import (
 from .types import (
     BroadcastInfo,
     BroadcastReadyCallback,
+    ClientCredentials,
     ConnectedCallback,
     ConnectionStatus,
     DisconnectedCallback,
@@ -89,6 +108,7 @@ __all__ = [
     "ClientConfig",
     "AdvancedConfig",
     # Types
+    "ClientCredentials",
     "VideoFrame",
     "ConnectionStatus",
     "Recording",
