@@ -77,6 +77,7 @@ from .types import (
     SpectatorConnection,
     StatusChangeCallback,
     StreamEndedCallback,
+    StreamerCapabilities,
     StreamErrorCallback,
     StreamRecordingInfo,
     StreamRecordingsList,
@@ -115,6 +116,7 @@ __all__ = [
     "StreamRecordingInfo",
     "StreamRecordingsList",
     "BroadcastInfo",
+    "StreamerCapabilities",
     # Simulation types
     "SimulationJobStatus",
     "SimulationStream",
@@ -134,7 +136,7 @@ __all__ = [
     "StatusChangeCallback",
 ]
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 
 
 async def connect_to_stream(

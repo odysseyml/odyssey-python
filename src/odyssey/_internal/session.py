@@ -1,10 +1,13 @@
 """Session management client for Odyssey."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
+from typing import Any
 
 import aiohttp
 
@@ -31,6 +34,7 @@ class SessionInfo:
     signaling_url: str
     session_token: str
     session_token_expires_in: int
+    capabilities: dict[str, bool] | None = None
 
 
 class SessionClient:
@@ -144,11 +148,11 @@ class SessionClient:
     async def _request_session_once(
         self,
         region_latencies_task: asyncio.Task[dict[str, int]] | None = None,
-    ) -> dict[str, str] | None:
+    ) -> dict[str, Any] | None:
         """Request session from API (single attempt).
 
         Returns:
-            Dict with session_id and signaling_url, or None if no streamers available.
+            Dict with session_id, signaling_url, and capabilities, or None if no streamers available.
         """
         self._log(f"Requesting session from API at {self._api_url}")
 
@@ -196,11 +200,16 @@ class SessionClient:
             self._error(f"Invalid API response: {data}")
             raise ValueError("Invalid API response: missing session_id or signalling_url")
 
+        # Parse capabilities (with fallback for backwards compatibility)
+        raw_capabilities = data.get("capabilities")
+        capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {"image_to_video": False}
+
         self._log(f"Received session from API: {data}")
 
         return {
             "session_id": data["session_id"],
             "signaling_url": data["signalling_url"],
+            "capabilities": capabilities,
         }
 
     async def request_session(self) -> SessionInfo:
@@ -224,6 +233,7 @@ class SessionClient:
                 signaling_url=result["signaling_url"],
                 session_token=token_info.token,
                 session_token_expires_in=token_info.expires_in,
+                capabilities=result.get("capabilities"),
             )
 
         # No streamers available - start polling if timeout > 0
@@ -243,6 +253,7 @@ class SessionClient:
                     signaling_url=result["signaling_url"],
                     session_token=token_info.token,
                     session_token_expires_in=token_info.expires_in,
+                    capabilities=result.get("capabilities"),
                 )
 
             elapsed = int(time.time() - start_time)

@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -162,6 +162,29 @@ class StreamRecordingsList:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamerCapabilities:
+    """Streamer capabilities advertised by the connected session.
+
+    Used to determine what features are available.
+
+    Attributes:
+        image_to_video: Whether the model supports image-to-video generation.
+    """
+
+    image_to_video: bool = False
+
+    def to_dict(self) -> dict[str, bool]:
+        """Serialize to a plain dict."""
+        return {"image_to_video": self.image_to_video}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> StreamerCapabilities:
+        """Deserialize from a plain dict."""
+        raw = data.get("image_to_video", False)
+        return cls(image_to_video=raw if isinstance(raw, bool) else False)
+
+
+@dataclass(frozen=True, slots=True)
 class ClientCredentials:
     """Pre-minted credentials for client-side connections.
 
@@ -177,6 +200,7 @@ class ClientCredentials:
         session_token: Short-lived JWT for session authentication.
             Must contain a ``session_id`` claim in its payload.
         expires_in: Token lifetime in seconds.
+        capabilities: Streamer capabilities from the provisioned session.
         session_id: Derived from the JWT — do not provide manually.
 
     Example:
@@ -199,6 +223,7 @@ class ClientCredentials:
     signaling_url: str
     session_token: str
     expires_in: int
+    capabilities: StreamerCapabilities | None = None
     session_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -219,39 +244,46 @@ class ClientCredentials:
             f"expires_in={self.expires_in})"
         )
 
-    def to_dict(self) -> dict[str, str | int]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for transport (e.g., JSON API response).
 
         Includes ``session_id`` for convenience (e.g., so JavaScript clients
         don't need to decode the JWT). The full ``session_token`` is included —
         only call this when you intend to transmit credentials to the client.
         """
-        return {
+        d: dict[str, Any] = {
             "session_id": self.session_id,
             "signaling_url": self.signaling_url,
             "session_token": self.session_token,
             "expires_in": self.expires_in,
         }
+        if self.capabilities is not None:
+            d["capabilities"] = self.capabilities.to_dict()
+        return d
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | int]) -> ClientCredentials:
+    def from_dict(cls, data: dict[str, Any]) -> ClientCredentials:
         """Deserialize from a plain dict (e.g., received from server API).
 
         The ``session_id`` in the dict is ignored — it is re-derived from
         the JWT to ensure consistency.
 
         Args:
-            data: Dict with signaling_url, session_token, expires_in
+            data: Dict with signaling_url, session_token, expires_in,
+                and optionally capabilities
                 (session_id is optional and ignored).
 
         Raises:
             KeyError: If a required field is missing.
             ValueError: If the session_token is not a valid JWT.
         """
+        caps_raw = data.get("capabilities")
+        capabilities = StreamerCapabilities.from_dict(caps_raw) if isinstance(caps_raw, dict) else None
         return cls(
             signaling_url=str(data["signaling_url"]),
             session_token=str(data["session_token"]),
             expires_in=int(data["expires_in"]),
+            capabilities=capabilities,
         )
 
 

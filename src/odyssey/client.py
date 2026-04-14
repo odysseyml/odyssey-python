@@ -29,6 +29,7 @@ from .types import (
     SimulationStream,
     StatusChangeCallback,
     StreamEndedCallback,
+    StreamerCapabilities,
     StreamErrorCallback,
     StreamRecordingInfo,
     StreamRecordingsList,
@@ -107,6 +108,7 @@ class Odyssey:
         self._status = ConnectionStatus.DISCONNECTED
         self._session_id: str | None = None
         self._current_signaling_url: str | None = None
+        self._capabilities = StreamerCapabilities()
 
         # Internal clients
         self._auth: AuthClient | None = None
@@ -275,10 +277,15 @@ class Odyssey:
 
             self._session_id = session_info.session_id
             self._current_signaling_url = session_info.signaling_url
+            if session_info.capabilities:
+                self._capabilities = StreamerCapabilities.from_dict(session_info.capabilities)
             if self._telemetry:
                 self._telemetry.set_session_id(self._session_id)
 
-            self._log(f"Using API-assigned session {self._session_id} at {self._current_signaling_url}")
+            self._log(
+                f"Using API-assigned session {self._session_id} at "
+                f"{self._current_signaling_url} (capabilities: {self._capabilities})"
+            )
 
         except OdysseyUsageError as e:
             # Usage errors (429) should propagate with their typed class intact
@@ -375,10 +382,15 @@ class Odyssey:
             try:
                 session_info = await session_client.request_session()
 
+                capabilities = None
+                if session_info.capabilities:
+                    capabilities = StreamerCapabilities.from_dict(session_info.capabilities)
+
                 return ClientCredentials(
                     signaling_url=session_info.signaling_url,
                     session_token=session_info.session_token,
                     expires_in=session_info.session_token_expires_in,
+                    capabilities=capabilities,
                 )
             except OdysseyUsageError:
                 raise
@@ -456,6 +468,10 @@ class Odyssey:
         self._retry_count = 0
         self._session_id = credentials.session_id
         self._current_signaling_url = credentials.signaling_url
+        if credentials.capabilities is not None:
+            self._capabilities = credentials.capabilities
+        else:
+            self._capabilities = StreamerCapabilities()
         if self._telemetry:
             self._telemetry.set_session_id(self._session_id)
             self._telemetry.report_connecting()

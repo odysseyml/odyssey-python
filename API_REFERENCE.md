@@ -993,22 +993,8 @@ Configuration for the Odyssey client.
 class ClientConfig:
     api_key: str                        # API key for authentication (required)
     api_url: str = "https://api.odyssey.ml"  # API URL
-    dev: DevConfig = DevConfig()        # Development settings
+    debug: bool = False                 # Enable debug logging
     advanced: AdvancedConfig = AdvancedConfig()  # Advanced settings
-```
-
----
-
-### DevConfig
-
-Development/debug settings.
-
-```python
-@dataclass
-class DevConfig:
-    signaling_url: str | None = None  # Direct signaling URL (bypasses API)
-    session_id: str | None = None     # Session ID for direct connection
-    debug: bool = False               # Enable debug logging
 ```
 
 ---
