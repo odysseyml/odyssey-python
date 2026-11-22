@@ -120,7 +120,7 @@ await client.start_stream("A sunset", broadcast=True)
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.12 or 3.13
 - WebRTC-capable environment
 
 ## Simulation (Async Video Generation)
