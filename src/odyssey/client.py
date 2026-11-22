@@ -11,6 +11,7 @@ from typing import Any
 from ._internal import AuthClient, RecordingsClient, SessionClient, SignalingClient, SimulationsClient, WebRTCConnection
 from ._internal.telemetry import ClientErrorType, TelemetryReporter
 from ._internal.webrtc import WebRTCCallbacks
+from .action_controls import ActionControls
 from .config import ClientConfig
 from .exceptions import OdysseyAuthError, OdysseyConnectionError, OdysseyStreamError, OdysseyUsageError
 from .types import (
@@ -20,8 +21,10 @@ from .types import (
     ConnectionStatus,
     DisconnectedCallback,
     ErrorCallback,
+    InitializationBehavior,
     InteractAcknowledgedCallback,
     Recording,
+    RuntimeBehavior,
     SimulationJobDetail,
     SimulationJobInfo,
     SimulationJobsList,
@@ -271,6 +274,10 @@ class Odyssey:
                 api_url=self._config.api_url,
                 queue_timeout_s=self._config.advanced.queue_timeout_s,
                 debug=self._config.debug,
+                target_width=self._config.target_width,
+                target_height=self._config.target_height,
+                target_fps=self._config.target_fps,
+                model=self._config.model,
             )
 
             session_info = await self._session.request_session()
@@ -378,6 +385,10 @@ class Odyssey:
                 api_url=self._config.api_url,
                 queue_timeout_s=self._config.advanced.queue_timeout_s,
                 debug=self._config.debug,
+                target_width=self._config.target_width,
+                target_height=self._config.target_height,
+                target_fps=self._config.target_fps,
+                model=self._config.model,
             )
             try:
                 session_info = await session_client.request_session()
@@ -664,6 +675,9 @@ class Odyssey:
         """Handle signaling connection close."""
         self._log(f"Signaling closed (code: {code}, reason: {reason})")
 
+        if self._webrtc:
+            self._webrtc.fail_pending_operations(OdysseyConnectionError("Signaling connection closed"))
+
         is_normal_closure = code in (1000, 1001)
 
         if is_normal_closure:
@@ -700,6 +714,8 @@ class Odyssey:
 
         self._set_status(ConnectionStatus.FAILED, error_message, error=err)
         self._error(f"Signaling error: {reason}")
+        if self._webrtc:
+            self._webrtc.fail_pending_operations(err)
 
         if self._handlers.on_error:
             self._handlers.on_error(err, True)
@@ -788,28 +804,35 @@ class Odyssey:
         }
         if bypass_prompt_expansion is not None:
             message["bypass_vlm_expansion"] = bypass_prompt_expansion
-        message_size = len(json.dumps(message).encode("utf-8"))
-        max_message_size = self._webrtc.max_message_size()
-        if input_image_base64:
-            self._log(f"Starting stream via signaling with prompt: '{prompt[:50]}...'")
-            await self._signaling.send(message)
-        else:
-            if self._webrtc.is_data_channel_open:
-                if message_size > max_message_size:
-                    self._log(
-                        f"start_stream payload {message_size} bytes exceeds data channel max {max_message_size}; "
-                        "using signaling"
-                    )
-                    await self._signaling.send(message)
-                else:
-                    self._log(f"Starting stream via data channel with prompt: '{prompt[:50]}...'")
-                    self._webrtc.send_event(message)
-            else:
-                self._log("Data channel not open; falling back to signaling for start_stream")
+        # WebSocket send can yield to a response; register its waiter first.
+        started = self._webrtc.prepare_stream_start()
+        try:
+            message_size = len(json.dumps(message).encode("utf-8"))
+            max_message_size = self._webrtc.max_message_size()
+            if input_image_base64:
+                self._log(f"Starting stream via signaling with prompt: '{prompt[:50]}...'")
                 await self._signaling.send(message)
+            else:
+                if self._webrtc.is_data_channel_open:
+                    if message_size > max_message_size:
+                        self._log(
+                            f"start_stream payload {message_size} bytes exceeds data channel max {max_message_size}; "
+                            "using signaling"
+                        )
+                        await self._signaling.send(message)
+                    else:
+                        self._log(f"Starting stream via data channel with prompt: '{prompt[:50]}...'")
+                        self._webrtc.send_event(message)
+                else:
+                    self._log("Data channel not open; falling back to signaling for start_stream")
+                    await self._signaling.send(message)
 
-        # Wait for stream_started response via data channel
-        return await self._webrtc.wait_for_stream_start()
+            # Wait for stream_started response via data channel
+            return await started
+        except BaseException:
+            if not started.done():
+                started.cancel()
+            raise
 
     async def _image_to_base64(self, image_path: str, portrait: bool) -> str:
         """Convert an image file to base64 data URL.
@@ -958,6 +981,16 @@ class Odyssey:
 
         return await self._webrtc.interact(prompt)
 
+    async def send_action_controls(self, controls: ActionControls | None = None) -> int:
+        """Send an O3 held-input snapshot, or release all controls when omitted.
+
+        Returns the local sequence sent, not a server/model acknowledgement.
+        Prompt updates continue to use interact().
+        """
+        if self._status != ConnectionStatus.CONNECTED or not self._webrtc:
+            raise OdysseyStreamError("Action controls require a connected, active O3 stream")
+        return self._webrtc.send_action_controls(controls if controls is not None else {})
+
     async def end_stream(self) -> None:
         """End the current interactive stream session.
 
@@ -1099,6 +1132,10 @@ class Odyssey:
         script_url: str | None = None,
         portrait: bool = True,
         bypass_prompt_expansion: bool | None = None,
+        dynamic_action_enhancement: bool = False,
+        controls_overlay: bool = True,
+        runtime_behavior: RuntimeBehavior | None = None,
+        initialization_behavior: InitializationBehavior | None = None,
     ) -> SimulationJobDetail:
         """Submit a simulation job to be processed asynchronously.
 
@@ -1129,6 +1166,11 @@ class Odyssey:
             bypass_prompt_expansion: Skip prompt expansion for this job (safety-only mode).
                 Requires the expansion bypass privilege; returns 403 if set without it.
                 None = use default behavior (expand).
+            dynamic_action_enhancement: Enable the system-assigned harness action source.
+            controls_overlay: Generate a separate MP4 with the system-pinned modern controls HUD.
+                Enabled by default; pass False to keep only the raw video.
+            runtime_behavior: Complete runtime_behavior/1 harness policy bundle.
+            initialization_behavior: Complete initialization_behavior/1 seed-image policy bundle.
 
         Returns:
             SimulationJobDetail with job info including job_id.
@@ -1190,6 +1232,10 @@ class Odyssey:
             script_url=script_url,
             portrait=portrait,
             bypass_prompt_expansion=bypass_prompt_expansion,
+            dynamic_action_enhancement=dynamic_action_enhancement,
+            controls_overlay=controls_overlay,
+            runtime_behavior=runtime_behavior,
+            initialization_behavior=initialization_behavior,
         )
 
         return SimulationJobDetail(
@@ -1205,6 +1251,9 @@ class Odyssey:
             retry_count=data.get("retry_count", 0),
             streams=[],
             estimated_wait_minutes=data.get("estimated_wait_minutes"),
+            runtime_behavior=data.get("runtime_behavior"),
+            initialization_behavior=data.get("initialization_behavior"),
+            execution_receipt=data.get("execution_receipt"),
         )
 
     async def _process_simulation_script(self, script: list[dict[str, Any]], portrait: bool) -> list[dict[str, Any]]:
@@ -1362,12 +1411,17 @@ class Odyssey:
             SimulationStream(
                 stream_id=s["stream_id"],
                 video_url=s.get("video_url"),
+                controls_overlay_url=s.get("controls_overlay_url"),
                 events_url=s.get("events_url"),
                 thumbnail_url=s.get("thumbnail_url"),
                 preview_url=s.get("preview_url"),
                 frame_count=s.get("frame_count"),
                 duration_seconds=s.get("duration_seconds"),
                 script_index=s.get("script_index", 0),
+                execution_receipt=s.get("execution_receipt"),
+                platform_session_ref=s.get("platform_session_ref"),
+                platform_stream_ref=s.get("platform_stream_ref"),
+                harness_session_ref=s.get("harness_session_ref"),
             )
             for s in data.get("streams", [])
         ]
@@ -1385,6 +1439,9 @@ class Odyssey:
             retry_count=data.get("retry_count", 0),
             streams=streams,
             estimated_wait_minutes=data.get("estimated_wait_minutes"),
+            runtime_behavior=data.get("runtime_behavior"),
+            initialization_behavior=data.get("initialization_behavior"),
+            execution_receipt=data.get("execution_receipt"),
         )
 
     async def list_simulations(
@@ -1449,9 +1506,11 @@ class Odyssey:
         )
 
     async def cancel_simulation(self, job_id: str) -> SimulationJobInfo:
-        """Cancel a pending or dispatched simulation job.
+        """Cancel queued work or request a stop for funded active work.
 
-        Cannot cancel jobs that are already processing or completed.
+        Funded active work can remain processing while its stop and usage are
+        reconciled. Poll get_simulate_status until the job reaches a terminal status.
+        Legacy processing jobs and completed jobs reject cancellation.
 
         Note: This method can be called without an active connection.
         It only requires a valid API key.

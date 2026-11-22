@@ -5,9 +5,11 @@ from typing import Any
 
 import aiohttp
 
+from ..types import InitializationBehavior, RuntimeBehavior
 from .auth import AuthClient
 
 logger = logging.getLogger(__name__)
+SIMULATION_SUBMIT_TIMEOUT_SECONDS = 360
 
 
 class SimulationsClient:
@@ -34,6 +36,8 @@ class SimulationsClient:
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._http_session is None or self._http_session.closed:
+            # TODO: avoid IPv4 NAT: disable DNS rotation, keep resolver caching.
+            # nosemgrep: aiohttp-default-dns-cache
             self._http_session = aiohttp.ClientSession()
         return self._http_session
 
@@ -53,6 +57,10 @@ class SimulationsClient:
         script_url: str | None = None,
         portrait: bool = True,
         bypass_prompt_expansion: bool | None = None,
+        dynamic_action_enhancement: bool = False,
+        controls_overlay: bool = True,
+        runtime_behavior: RuntimeBehavior | None = None,
+        initialization_behavior: InitializationBehavior | None = None,
     ) -> dict[str, Any]:
         """Submit a simulation job.
 
@@ -62,6 +70,11 @@ class SimulationsClient:
             script_url: URL to script JSON file.
             portrait: Portrait (True) or landscape (False).
             bypass_prompt_expansion: Skip prompt expansion (requires privilege).
+            dynamic_action_enhancement: Enable the system-assigned harness action source.
+            controls_overlay: Generate a separate MP4 with the system-pinned modern controls HUD.
+                Enabled by default; pass False to keep only the raw video.
+            runtime_behavior: Complete runtime_behavior/1 harness policy bundle.
+            initialization_behavior: Complete initialization_behavior/1 seed-image policy bundle.
 
         Returns:
             Dict with job info including job_id.
@@ -84,6 +97,14 @@ class SimulationsClient:
         }
         if bypass_prompt_expansion is not None:
             body["bypass_vlm_expansion"] = bypass_prompt_expansion
+        if dynamic_action_enhancement:
+            body["dynamic_action_enhancement"] = True
+        if controls_overlay:
+            body["controls_overlay"] = True
+        if runtime_behavior is not None:
+            body["runtime_behavior"] = runtime_behavior
+        if initialization_behavior is not None:
+            body["initialization_behavior"] = initialization_behavior
 
         if script_url:
             body["script_url"] = script_url
@@ -96,7 +117,11 @@ class SimulationsClient:
         headers = await self._get_auth_headers()
         url = f"{self._api_url}/simulation-jobs"
 
-        async with session.post(url, headers=headers, json=body) as response:
+        # Submission performs canonical world initialization before the job is
+        # persisted. Over-seeding may run several dependent provider stages, so
+        # the SDK budget must exceed the broker's complete initialization budget.
+        timeout = aiohttp.ClientTimeout(total=SIMULATION_SUBMIT_TIMEOUT_SECONDS)
+        async with session.post(url, headers=headers, json=body, timeout=timeout) as response:
             if not response.ok:
                 error_text = await response.text()
                 raise ConnectionError(f"Failed to submit simulation: {response.status} {error_text}")

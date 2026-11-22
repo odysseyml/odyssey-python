@@ -14,6 +14,7 @@ from aiortc import RTCConfiguration, RTCIceCandidate, RTCIceServer, RTCPeerConne
 from aiortc.mediastreams import MediaStreamTrack
 from aiortc.sdp import candidate_from_sdp
 
+from ..action_controls import ActionControls, action_controls_event
 from ..exceptions import (
     ConcurrentLimitReachedError,
     MonthlyLimitReachedError,
@@ -126,6 +127,9 @@ class WebRTCConnection:
 
         # Last applied prompt from stream_started response
         self._last_applied_prompt: str | None = None
+        self._control_stream_id: str | None = None
+        self._control_sequence = 0
+        self._controls_were_sent = False
 
         # Data channel state tracking
         self._data_channel_open_future: asyncio.Future[None] | None = None
@@ -146,6 +150,8 @@ class WebRTCConnection:
             # Convert ws:// or wss:// to http:// or https://
             http_url = signaling_url.replace("ws://", "http://").replace("wss://", "https://")
 
+            # TODO: avoid IPv4 NAT: disable DNS rotation, keep resolver caching.
+            # nosemgrep: aiohttp-default-dns-cache
             async with aiohttp.ClientSession() as session, session.get(f"{http_url}/config") as response:
                 config = await response.json()
                 self._ice_servers = config.get("iceServers", [])
@@ -339,6 +345,9 @@ class WebRTCConnection:
                 if msg_type == "stream_started":
                     stream_id = data.get("stream_id", "")
                     self._last_applied_prompt = data.get("applied_prompt")
+                    self._control_stream_id = stream_id
+                    self._control_sequence = 0
+                    self._controls_were_sent = False
                     if self._stream_start_future and not self._stream_start_future.done():
                         self._stream_start_future.set_result(stream_id)
                     if self._callbacks.on_stream_started:
@@ -378,12 +387,16 @@ class WebRTCConnection:
                         self._callbacks.on_interact_acknowledged(prompt)
 
                 elif msg_type == "stream_ended":
+                    self._control_stream_id = None
+                    self._controls_were_sent = False
                     if self._stream_end_future and not self._stream_end_future.done():
                         self._stream_end_future.set_result(None)
                     if self._callbacks.on_stream_ended:
                         self._callbacks.on_stream_ended()
 
                 elif msg_type == "interactive_stream_error":
+                    self._control_stream_id = None
+                    self._controls_were_sent = False
                     reason = data.get("reason", "unknown")
                     err_message = data.get("message", "Stream error occurred")
                     logger.error(f"Interactive stream error: {reason} - {err_message}")
@@ -421,13 +434,25 @@ class WebRTCConnection:
                 return max_size
         return DEFAULT_MAX_DATA_CHANNEL_MESSAGE_SIZE
 
+    def prepare_stream_start(self) -> asyncio.Future[str]:
+        if self._stream_start_future and not self._stream_start_future.done():
+            raise OdysseyStreamError("A stream start is already pending")
+        self._stream_start_future = asyncio.get_running_loop().create_future()
+        return self._stream_start_future
+
+    def fail_pending_operations(self, error: Exception) -> None:
+        for future in (self._stream_start_future, self._interact_future, self._stream_end_future):
+            if future is not None and not future.done():
+                future.set_exception(error)
+
     async def wait_for_stream_start(self) -> str:
         """Wait for stream_started response from streamer.
 
         Returns:
             Stream ID when the stream is ready.
         """
-        self._stream_start_future = asyncio.get_event_loop().create_future()
+        if self._stream_start_future is None:
+            raise OdysseyStreamError("Prepare the stream start before sending its request")
         return await self._stream_start_future
 
     async def interact(self, prompt: str) -> str:
@@ -447,8 +472,20 @@ class WebRTCConnection:
 
         return await self._interact_future
 
+    def send_action_controls(self, controls: ActionControls) -> int:
+        if not self._control_stream_id:
+            raise OdysseyStreamError("Action controls require an active stream")
+        sequence = self._control_sequence + 1
+        event = action_controls_event(controls, self._control_stream_id, sequence)
+        self.send_event(event)
+        self._control_sequence = sequence
+        self._controls_were_sent = True
+        return sequence
+
     async def end_stream(self) -> None:
         """End the current interactive stream session."""
+        if self._controls_were_sent and self._control_stream_id:
+            self.send_action_controls({})
         self._stream_end_future = asyncio.get_event_loop().create_future()
 
         self.send_event(
@@ -461,12 +498,22 @@ class WebRTCConnection:
 
     async def close(self) -> None:
         """Close the WebRTC connection."""
+        if self._controls_were_sent and self._control_stream_id and self.is_data_channel_open:
+            try:
+                self.send_action_controls({})
+            except Exception:
+                # A closing transport must still release local resources.
+                logger.debug("Could not send final control release", exc_info=True)
+        self._control_stream_id = None
+        self._controls_were_sent = False
         # Cancel frame task
         if self._frame_task:
             self._frame_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._frame_task
             self._frame_task = None
+
+        self.fail_pending_operations(ConnectionError("Connection closed"))
 
         # Clear futures and state
         self._stream_start_future = None

@@ -120,7 +120,7 @@ await client.start_stream("A sunset", broadcast=True)
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.12 or 3.13
 - WebRTC-capable environment
 
 ## Simulation (Async Video Generation)
@@ -243,3 +243,8 @@ class BroadcastInfo:
 
 - [API Reference](API_REFERENCE.md)
 - [Get an API key](https://documentation.api.odyssey.ml/)
+
+## Odyssey-3
+
+The same client and lifecycle support explicit O3 selection and action controls.
+See [the API reference](./API_REFERENCE.md#odyssey-3-extensions) for additive configuration and methods, and the [Odyssey-3 guide](https://documentation.api.odyssey.ml/odyssey-3) for the common Streaming and Simulation workflow.

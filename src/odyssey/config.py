@@ -47,7 +47,11 @@ class ClientConfig:
             ``connect_with_credentials()`` with pre-minted session tokens.
         api_url: API URL (defaults to production).
         debug: Enable debug logging.
+        target_width: Optional WebRTC output width.
+        target_height: Optional WebRTC output height.
+        target_fps: Optional maximum WebRTC output frame rate.
         advanced: Advanced connection settings.
+        model: Optional Streaming model; omitted to use the server default.
     """
 
     api_key: str = ""
@@ -59,13 +63,42 @@ class ClientConfig:
     debug: bool = False
     """Enable debug logging."""
 
+    target_width: int | None = None
+    """Optional WebRTC output width. Must be even and supplied with target_height."""
+
+    target_height: int | None = None
+    """Optional WebRTC output height. Must be even and supplied with target_width."""
+
+    target_fps: int | None = None
+    """Optional maximum WebRTC output frame rate. Must be from 1 through 60."""
+
     advanced: AdvancedConfig = field(default_factory=AdvancedConfig)
     """Advanced connection settings."""
 
+    model: str | None = None
+    """Optional Streaming model. Simulation uses its server-assigned execution profile."""
+
     def __post_init__(self) -> None:
         """Validate configuration."""
+        if self.model is not None and (not isinstance(self.model, str) or not self.model.strip()):
+            raise ValueError("model must be a nonblank string when provided")
         if not isinstance(self.api_key, str):
             raise TypeError("api_key must be a string")
+        if (self.target_width is None) != (self.target_height is None):
+            raise ValueError("target_width and target_height must be provided together")
+        for name, value in (("target_width", self.target_width), ("target_height", self.target_height)):
+            if value is not None and (not isinstance(value, int) or value < 16 or value > 4096 or value % 2):
+                raise ValueError(f"{name} must be an even integer between 16 and 4096")
+        if (
+            self.target_fps is not None
+            and (
+                not isinstance(self.target_fps, int)
+                or isinstance(self.target_fps, bool)
+                or self.target_fps < 1
+                or self.target_fps > 60
+            )
+        ):
+            raise ValueError("target_fps must be an integer between 1 and 60")
 
     def require_api_key(self) -> str:
         """Return the API key, raising if it is empty or blank.

@@ -592,7 +592,8 @@ active = await client.list_simulations(active=True)
 
 #### `cancel_simulation(job_id)`
 
-Cancel a pending or dispatched simulation job.
+Cancel queued work or request a stop for funded active work.
+Funded active work can remain `processing` while its stop and usage are reconciled; poll `get_simulate_status` for a terminal status.
 
 ```python
 async def cancel_simulation(job_id: str) -> SimulationJobInfo
@@ -606,7 +607,7 @@ async def cancel_simulation(job_id: str) -> SimulationJobInfo
 
 **Returns:** `SimulationJobInfo` - Cancellation confirmation.
 
-**Raises:** `ValueError` - If job not found, not authorized, or cannot be cancelled (already processing/completed).
+**Raises:** `ValueError` - If job not found, not authorized, or cannot be cancelled (legacy processing work or completed work).
 
 **Note:** This method can be called without an active connection.
 
@@ -994,6 +995,10 @@ class ClientConfig:
     api_key: str                        # API key for authentication (required)
     api_url: str = "https://api.odyssey.ml"  # API URL
     debug: bool = False                 # Enable debug logging
+    model: str | None = None            # Optional Streaming model; server default when omitted
+    target_width: int | None = None      # Optional even WebRTC output width
+    target_height: int | None = None     # Optional even WebRTC output height
+    target_fps: int | None = None        # Optional maximum WebRTC output frame rate
     advanced: AdvancedConfig = AdvancedConfig()  # Advanced settings
 ```
 
@@ -1302,3 +1307,23 @@ The `on_error` handler receives a `fatal` boolean parameter:
 ## Python Version
 
 Requires Python 3.12 or later.
+
+## Odyssey-3 extensions
+
+Use `Odyssey(api_key=..., model="odyssey-3")` to select O3 for Streaming.
+`api_url` selects the API environment, with Production as the default; Staging uses `https://staging.api.odyssey.ml` and a Staging key.
+Optional `target_width`, `target_height`, and `target_fps` request WebRTC output; supply both dimensions together.
+The same configuration applies to `create_client_credentials()`.
+Omit `model` to preserve the server default, and use `portrait=False` with the landscape O3 execution profile.
+Simulation chooses its execution profile on the server rather than through this Streaming model option.
+
+After `start_stream()` resolves, use `await client.send_action_controls(snapshot)` for a complete held-input snapshot.
+For example, `{"keys": ["w", "d"], "mouse_dx": 12.0}` holds W/D and applies one relative camera movement.
+The next snapshot replaces held keys/buttons; `{}` releases them.
+The returned integer is a local send sequence, not a server/model acknowledgement.
+Existing `interact()`, `end_stream()`, and `disconnect()` retain their lifecycle roles.
+The SDK attempts a final neutral snapshot before ending or disconnecting after controls have been used.
+
+Use exported `ActionControls`, `ActionControlKey`, `ActionControlButton`, `ActionControlBinding`, and `ActionControlsSemanticMap` types.
+The [action controls guide](https://documentation.api.odyssey.ml/action-controls) owns the vocabulary, camera metadata distinction, semantic maps, and recording evidence contract.
+Recordings expose actual consumed inputs through newline-delimited JSON events, separately from live prompt acknowledgements.

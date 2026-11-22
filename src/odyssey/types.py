@@ -7,13 +7,60 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
     from ._internal.whep import WhepConnection
+
+
+class RuntimeBehavior(TypedDict, total=False):
+    """Public runtime_behavior/1 request and receipt shape."""
+
+    version_id: Literal["runtime_behavior/1"]
+    harness_enabled: bool
+    prompt_enhancement_enabled: bool
+    action_controls_enhancement_enabled: bool
+    camera_prompt_style: Literal["nl", "magnitude"]
+    dynamic_prompting_enabled: bool
+    boost_enabled: bool
+
+
+class InitializationBehavior(TypedDict, total=False):
+    """Public initialization_behavior/1 request and receipt shape."""
+
+    version_id: Literal["initialization_behavior/1"]
+    seed_image_policy: Literal["overseed", "preserve_upload"]
+
+
+class HarnessExecutionReceipt(TypedDict, total=False):
+    """Observed harness behavior emitted by the model runtime."""
+
+    version_id: Literal["harness_execution_receipt/1"]
+    platform_session_ref: str | None
+    platform_session_absent: str | None
+    streamer_session_ref: str | None
+    job_id: str | None
+    stream_id: str
+    trace_session_ref: str | None
+    trace_state: Literal["queued", "landed", "failed", "unknown", "not_opened"]
+    model_runtime: dict[str, bool | int | float | str | None] | None
+    runtime_behavior: RuntimeBehavior
+    effective_runtime_behavior: dict[str, bool | str]
+    action_controls_runtime: dict[str, bool | str | None]
+    dynamic_action_enhancement_requested: bool
+    action_controls_context: dict[str, bool | float | str | None] | None
+    initialization_behavior: InitializationBehavior
+    initialization_id: str | None
+    original_prompt: str | None
+    projected_prompt: str | None
+    observed_prompt: str | None
+    harness_status: Literal["active", "disabled", "degraded", "failed"]
+    effective_prompt: str | None
+    effective_prompt_id: str | None
+    author_failure: str | None
 
 
 def _extract_session_id(token: str) -> str:
@@ -338,11 +385,16 @@ class SimulationStream:
     Attributes:
         stream_id: Unique identifier for the stream.
         video_url: Presigned URL for the video file, or None if not yet available.
+        controls_overlay_url: Presigned URL for the optional modern controls-HUD video.
         events_url: Presigned URL for the events JSON file, or None if not available.
         thumbnail_url: Presigned URL for the thumbnail image, or None if not available.
         preview_url: Presigned URL for the preview video, or None if not available.
         frame_count: Total number of frames in the video, or None if not available.
         duration_seconds: Duration of the video in seconds, or None if not available.
+        execution_receipt: Model-runtime proof of effective harness behavior.
+        platform_session_ref: Owning platform session identity.
+        platform_stream_ref: Owning platform stream-row identity.
+        harness_session_ref: Durable Eden harness session identity joined to this stream.
         script_index: Index of the script in batch mode (0 for single script).
     """
 
@@ -354,6 +406,11 @@ class SimulationStream:
     frame_count: int | None
     duration_seconds: float | None
     script_index: int
+    controls_overlay_url: str | None = None
+    execution_receipt: HarnessExecutionReceipt | None = None
+    platform_session_ref: str | None = None
+    platform_stream_ref: str | None = None
+    harness_session_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +465,9 @@ class SimulationJobDetail:
     retry_count: int
     streams: list[SimulationStream]
     estimated_wait_minutes: float | None = None
+    runtime_behavior: RuntimeBehavior | None = None
+    initialization_behavior: InitializationBehavior | None = None
+    execution_receipt: HarnessExecutionReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
