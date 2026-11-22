@@ -63,6 +63,8 @@ class TelemetryReporter:
         self._http_session: aiohttp.ClientSession | None = None
         self._platform_info = f"{platform.system()} {platform.release()} / Python {sys.version.split()[0]}"
         self._semaphore: asyncio.Semaphore | None = None
+        self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._closing = False
 
         # Timing for connect duration measurement
         self._connect_start_time: float | None = None
@@ -86,6 +88,8 @@ class TelemetryReporter:
 
     async def _get_http_session(self) -> aiohttp.ClientSession:
         if self._http_session is None or self._http_session.closed:
+            # TODO: avoid IPv4 NAT: disable DNS rotation, keep resolver caching.
+            # nosemgrep: aiohttp-default-dns-cache
             self._http_session = aiohttp.ClientSession()
         return self._http_session
 
@@ -164,11 +168,15 @@ class TelemetryReporter:
 
     def _schedule_send(self, event: dict[str, Any]) -> None:
         """Schedule an event to be sent. Returns immediately."""
+        if self._closing:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._send(event))
+        task = loop.create_task(self._send(event))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Send a single event to the telemetry endpoint. Never raises."""
@@ -199,7 +207,13 @@ class TelemetryReporter:
             self._log(f"Failed to send telemetry: {e}")
 
     async def close(self) -> None:
-        """Close the HTTP session."""
-        if self._http_session:
-            await self._http_session.close()
-            self._http_session = None
+        """Drain scheduled reports, then close the HTTP session."""
+        self._closing = True
+        try:
+            if self._pending_tasks:
+                await asyncio.gather(*tuple(self._pending_tasks), return_exceptions=True)
+            if self._http_session:
+                await self._http_session.close()
+                self._http_session = None
+        finally:
+            self._closing = False

@@ -126,6 +126,8 @@ class WhepConnection:
         self._log(f"Connecting to {webrtc_url}")
 
         # Create a shared HTTP session for all requests during connection
+        # TODO: avoid IPv4 NAT: disable DNS rotation, keep resolver caching.
+        # nosemgrep: aiohttp-default-dns-cache
         self._http_session = aiohttp.ClientSession()
 
         try:

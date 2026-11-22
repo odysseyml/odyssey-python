@@ -45,6 +45,13 @@ Two-phase auth (server mints credentials, client connects directly)::
     ```
 """
 
+from .action_controls import (
+    ActionControlBinding,
+    ActionControlButton,
+    ActionControlKey,
+    ActionControls,
+    ActionControlsSemanticMap,
+)
 from .client import Odyssey, OdysseyEventHandlers
 from .config import AdvancedConfig, ClientConfig
 from .exceptions import (
@@ -67,8 +74,11 @@ from .types import (
     ConnectionStatus,
     DisconnectedCallback,
     ErrorCallback,
+    HarnessExecutionReceipt,
+    InitializationBehavior,
     InteractAcknowledgedCallback,
     Recording,
+    RuntimeBehavior,
     SimulationJobDetail,
     SimulationJobInfo,
     SimulationJobsList,
@@ -117,6 +127,14 @@ __all__ = [
     "StreamRecordingsList",
     "BroadcastInfo",
     "StreamerCapabilities",
+    "RuntimeBehavior",
+    "InitializationBehavior",
+    "HarnessExecutionReceipt",
+    "ActionControls",
+    "ActionControlsSemanticMap",
+    "ActionControlKey",
+    "ActionControlButton",
+    "ActionControlBinding",
     # Simulation types
     "SimulationJobStatus",
     "SimulationStream",
@@ -136,7 +154,7 @@ __all__ = [
     "StatusChangeCallback",
 ]
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 async def connect_to_stream(

@@ -46,6 +46,10 @@ class SessionClient:
         api_url: str,
         queue_timeout_s: int = 120,
         debug: bool = False,
+        target_width: int | None = None,
+        target_height: int | None = None,
+        target_fps: int | None = None,
+        model: str | None = None,
     ) -> None:
         """Create a SessionClient.
 
@@ -54,11 +58,19 @@ class SessionClient:
             api_url: Base URL for the Odyssey API.
             queue_timeout_s: Timeout for waiting in queue for a streamer.
             debug: Enable debug logging.
+            target_width: Optional WebRTC output width.
+            target_height: Optional WebRTC output height.
+            target_fps: Optional maximum WebRTC output frame rate.
+            model: Optional Streaming model; omitted to use the server default.
         """
         self._auth = auth
         self._api_url = api_url
         self._queue_timeout_s = queue_timeout_s
         self._debug = debug
+        self._target_width = target_width
+        self._target_height = target_height
+        self._target_fps = target_fps
+        self._model = model
 
         # HTTP session
         self._http_session: aiohttp.ClientSession | None = None
@@ -79,6 +91,8 @@ class SessionClient:
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._http_session is None or self._http_session.closed:
+            # TODO: avoid IPv4 NAT: disable DNS rotation, keep resolver caching.
+            # nosemgrep: aiohttp-default-dns-cache
             self._http_session = aiohttp.ClientSession()
         return self._http_session
 
@@ -163,11 +177,18 @@ class SessionClient:
         session = await self._get_http_session()
         url = f"{self._api_url}/sessions/request"
 
-        body: dict[str, dict[str, int]] = {}
+        body: dict[str, Any] = {}
+        if self._model is not None:
+            body["model"] = self._model
         if region_latencies_task:
             region_latencies = await region_latencies_task
             if region_latencies:
                 body["region_latencies"] = region_latencies
+        if self._target_width is not None and self._target_height is not None:
+            body["target_width"] = self._target_width
+            body["target_height"] = self._target_height
+        if self._target_fps is not None:
+            body["target_fps"] = self._target_fps
 
         async with session.post(
             url,

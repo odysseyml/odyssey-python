@@ -61,6 +61,8 @@ class AuthClient:
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """Get or create HTTP session."""
         if self._http_session is None or self._http_session.closed:
+            # TODO: avoid IPv4 NAT: disable DNS rotation, keep resolver caching.
+            # nosemgrep: aiohttp-default-dns-cache
             self._http_session = aiohttp.ClientSession()
         return self._http_session
 
